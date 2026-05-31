@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# Node / dashboard
+dashboard/node_modules/
+dashboard/dist/
+*.tsbuildinfo
+
+# Generated analysis output
+omega-output/
+omega-output-*/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
