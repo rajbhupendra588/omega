@@ -5,6 +5,24 @@ Analyze **any GitHub repository** or local project. Get a **detailed dual report
 1. **Business report** — plain language for leaders, PMs, and non-technical stakeholders  
 2. **Technical report** — formulas, methodology, and per-module mathematical metrics  
 
+## Screenshots
+
+**Dashboard** — track repositories, grades, and run history:
+
+![Omega dashboard](docs/screenshots/dashboard.png)
+
+**New analysis** — analyze any public GitHub repo or local path:
+
+![New analysis](docs/screenshots/new-analysis.png)
+
+**Report overview** — Ω index, business/technical summaries, and field metrics:
+
+![Report overview](docs/screenshots/report-overview.png)
+
+**Improvements** — copy-paste refactors tied to your files and symbols:
+
+![Report improvements](docs/screenshots/report-improvements.png)
+
 ## Quick start
 
 ```bash
@@ -79,3 +97,12 @@ cd dashboard && npm install && npm run dev
 - Python 3.10+
 - `git` on PATH (for GitHub URLs)
 - Node.js 18+ (to build dashboard, or use `scripts/start-ui.sh` which builds once)
+
+## Regenerate README screenshots
+
+With the dashboard running at http://127.0.0.1:8765:
+
+```bash
+npx playwright@1.49.0 install chromium
+node scripts/capture-readme-screenshots.mjs
+```
