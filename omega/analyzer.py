@@ -50,6 +50,8 @@ class RepositoryOutcome:
     dimensions: list[dict] = field(default_factory=list)
     metric_suite: dict = field(default_factory=dict)
     agent_manifest: dict = field(default_factory=dict)
+    scorecard: dict[str, float] = field(default_factory=dict)
+    suggested_refactorings: list[str] = field(default_factory=list)
 
 
 def _grade(omega: float) -> str:
@@ -256,6 +258,101 @@ def _top_by_language(files: list[FileMetrics]) -> dict[str, float]:
     return {lang: round(sum(v) / len(v), 2) for lang, v in sorted(by_lang.items())}
 
 
+def _clamp_score(value: float) -> float:
+    return round(max(0.0, min(100.0, value)), 2)
+
+
+def _scorecard(
+    omega_index: float, pillars: dict[str, float], dimensions: list[dict]
+) -> dict[str, float]:
+    architecture_dim = next(
+        (
+            d
+            for d in dimensions
+            if "architecture" in str(d.get("name", "")).lower()
+            or str(d.get("id", "")).lower() == "architecture"
+        ),
+        None,
+    )
+    security_dim = next(
+        (
+            d
+            for d in dimensions
+            if "security" in str(d.get("name", "")).lower()
+            or str(d.get("id", "")).lower() == "security"
+        ),
+        None,
+    )
+    debt_dim = next(
+        (
+            d
+            for d in dimensions
+            if "debt" in str(d.get("name", "")).lower()
+            or "maintain" in str(d.get("name", "")).lower()
+        ),
+        None,
+    )
+    performance_dim = next(
+        (
+            d
+            for d in dimensions
+            if "performance" in str(d.get("name", "")).lower()
+            or str(d.get("id", "")).lower() == "performance"
+        ),
+        None,
+    )
+    code_quality = _clamp_score(100.0 - omega_index)
+    architecture = _clamp_score(
+        architecture_dim["score"]
+        if architecture_dim
+        else 100.0 - (pillars.get("coupling_field", 0.0) * 8.0 + pillars.get("topological_cycles", 0.0) * 6.0)
+    )
+    security = _clamp_score(
+        security_dim["score"]
+        if security_dim
+        else 100.0 - (pillars.get("coupling_field", 0.0) * 6.0 + pillars.get("cyclomatic_pressure", 0.0) * 2.0)
+    )
+    performance = _clamp_score(
+        performance_dim["score"]
+        if performance_dim
+        else 100.0 - (pillars.get("cyclomatic_pressure", 0.0) * 3.5 + pillars.get("p95_omega_local", 0.0) * 0.35)
+    )
+    technical_debt = _clamp_score(
+        debt_dim["score"]
+        if debt_dim
+        else 100.0 - (omega_index * 0.7 + pillars.get("p95_omega_local", 0.0) * 0.3)
+    )
+    return {
+        "code_quality": code_quality,
+        "security": security,
+        "performance": performance,
+        "architecture": architecture,
+        "technical_debt": technical_debt,
+    }
+
+
+def _suggested_refactorings(
+    entities: list[EntityMetrics], recommendations: list[str], limit: int = 8
+) -> list[str]:
+    out: list[str] = []
+    for e in entities:
+        if e.risk_band not in ("CRITICAL", "HIGH"):
+            continue
+        note = e.improvement_areas_business[0] if e.improvement_areas_business else (
+            e.improvement_areas[0] if e.improvement_areas else "reduce complexity and coupling"
+        )
+        out.append(
+            f"{e.qualified_name} ({e.file_path}:{e.line_start}-{e.line_end}) — {note}"
+        )
+        if len(out) >= limit:
+            return out
+    for rec in recommendations:
+        out.append(rec)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def analyze_repository(
     root: str | Path,
     *,
@@ -302,6 +399,10 @@ def analyze_repository(
             d.to_dict()
             for d in build_repo_dimensions(outcome, root=str(root_path))
         ]
+        outcome.scorecard = _scorecard(outcome.omega_index, outcome.pillars, outcome.dimensions)
+        outcome.suggested_refactorings = _suggested_refactorings(
+            outcome.entities, outcome.recommendations_business
+        )
         return outcome
 
     omega_index = round(sum(f.omega_local for f in files) / len(files), 2)
@@ -355,4 +456,8 @@ def analyze_repository(
         d.to_dict()
         for d in build_repo_dimensions(outcome, root=str(root_path))
     ]
+    outcome.scorecard = _scorecard(outcome.omega_index, outcome.pillars, outcome.dimensions)
+    outcome.suggested_refactorings = _suggested_refactorings(
+        outcome.entities, outcome.recommendations_business
+    )
     return outcome

@@ -717,6 +717,8 @@ def outcome_from_report_dict(data: dict) -> RepositoryOutcome:
         developer_guide=dict(data.get("developer_guide", {})),
         dimensions=list(data.get("dimensions", [])),
         metric_suite=dict(data.get("metric_suite", {})),
+        scorecard=dict(data.get("scorecard", {})),
+        suggested_refactorings=list(data.get("suggested_refactorings", [])),
     )
     if _report_needs_html_refresh(data):
         outcome.business = build_business_sections(outcome)
@@ -764,6 +766,7 @@ def _outcome_to_dict(outcome: RepositoryOutcome) -> dict:
         "quality_grade": outcome.quality_grade,
         "bayesian_quality": outcome.bayesian_quality,
         "epistemic_uncertainty": outcome.epistemic_uncertainty,
+        "scorecard": outcome.scorecard,
         "health_summary_technical": outcome.health_summary,
         "health_summary_business": outcome.health_summary_business,
         "file_count": outcome.file_count,
@@ -804,6 +807,7 @@ def _outcome_to_dict(outcome: RepositoryOutcome) -> dict:
         "entity_summary": outcome.entity_summary,
         "entity_hotspots": outcome.entity_hotspots,
         "improvement_plan": outcome.improvement_plan,
+        "suggested_refactorings": outcome.suggested_refactorings,
         "entities": [
             {
                 "entity_type": e.entity_type,
@@ -829,6 +833,11 @@ def _outcome_to_dict(outcome: RepositoryOutcome) -> dict:
             for e in outcome.entities
         ],
     }
+
+
+def outcome_to_report_dict(outcome: RepositoryOutcome) -> dict:
+    """Public helper for API/UI flows needing report JSON payload in-memory."""
+    return _outcome_to_dict(outcome)
 
 
 def _write_csv(outcome: RepositoryOutcome, path: Path) -> None:
@@ -881,6 +890,9 @@ def build_report(outcome: RepositoryOutcome, output_dir: Path) -> dict[str, Path
     paths["html"] = output_dir / "omega-report.html"
     paths["html"].write_text(build_html_report(outcome), encoding="utf-8")
 
+    paths["pdf"] = output_dir / "omega-report.pdf"
+    _write_pdf_report(outcome, paths["pdf"])
+
     paths["json"] = output_dir / "omega-report.json"
     payload = _outcome_to_dict(outcome)
     if "dimensions" not in payload:
@@ -910,6 +922,84 @@ def build_report(outcome: RepositoryOutcome, output_dir: Path) -> dict[str, Path
     )
 
     return paths
+
+
+def _write_pdf_report(outcome: RepositoryOutcome, path: Path) -> None:
+    """Generate a compact text-first PDF without external dependencies."""
+    scorecard = outcome.scorecard or {}
+    lines = [
+        f"Omega Quality Report - {outcome.repo_display}",
+        f"Analyzed: {outcome.analyzed_at}",
+        f"Repository: {outcome.root}",
+        "",
+        f"Code Quality Score: {scorecard.get('code_quality', 0)}",
+        f"Security Score: {scorecard.get('security', 0)}",
+        f"Performance Score: {scorecard.get('performance', 0)}",
+        f"Architecture Score: {scorecard.get('architecture', 0)}",
+        f"Technical Debt Score: {scorecard.get('technical_debt', 0)}",
+        "",
+        f"Omega Index: {outcome.omega_index} (Grade {outcome.quality_grade})",
+        f"Files: {outcome.file_count}  LOC: {outcome.total_loc}",
+        "",
+        "Suggested Refactoring for Omega:",
+    ]
+    for idx, item in enumerate(outcome.suggested_refactorings[:12], start=1):
+        lines.append(f"{idx}. {item}")
+    if not outcome.suggested_refactorings:
+        lines.append("1. No urgent refactoring suggestions for this run.")
+
+    font_size = 11
+    line_height = 16
+    page_width = 595
+    page_height = 842
+    x = 50
+    y = page_height - 60
+    stream_lines: list[str] = ["BT", f"/F1 {font_size} Tf", f"{x} {y} Td"]
+
+    used_lines = 0
+    for line in lines:
+        safe = (
+            line.replace("\\", "\\\\")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+            .encode("latin-1", "replace")
+            .decode("latin-1")
+        )
+        if used_lines > 0:
+            stream_lines.append(f"0 -{line_height} Td")
+        stream_lines.append(f"({safe}) Tj")
+        used_lines += 1
+        if y - used_lines * line_height < 70:
+            break
+    stream_lines.append("ET")
+    content = "\n".join(stream_lines).encode("latin-1", "replace")
+
+    objects = [
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
+        f"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj".encode(
+            "ascii"
+        ),
+        b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj",
+        b"5 0 obj << /Length " + str(len(content)).encode("ascii") + b" >> stream\n" + content + b"\nendstream endobj",
+    ]
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(pdf))
+        pdf.extend(obj + b"\n")
+    xref_pos = len(pdf)
+    pdf.extend(f"xref\n0 {len(offsets)}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        pdf.extend(f"{off:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        f"trailer << /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode(
+            "ascii"
+        )
+    )
+    path.write_bytes(bytes(pdf))
 
 
 def _build_implementations_markdown(outcome: RepositoryOutcome) -> str:

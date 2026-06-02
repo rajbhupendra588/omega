@@ -6,6 +6,8 @@ from pathlib import Path
 
 from omega.github import is_github_target, parse_github_target
 
+_UPLOAD_TARGET_PREFIX = "upload://"
+
 
 def target_metadata(target: str) -> tuple[str, str, str | None]:
     """
@@ -36,6 +38,8 @@ def target_metadata(target: str) -> tuple[str, str, str | None]:
 
 def can_rerun_target(target: str) -> str | None:
     """Return an error message if rerun is not feasible, else None."""
+    if target.strip().startswith(_UPLOAD_TARGET_PREFIX):
+        return "Uploaded zip analyses cannot be re-run automatically; upload again."
     try:
         _, _, github_url = target_metadata(target)
     except ValueError as e:

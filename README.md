@@ -64,6 +64,40 @@ omega psf/requests
 omega psf/requests --out ./my-reports
 ```
 
+## Run on any machine (recommended)
+
+Use Docker so you do not need local Python/Node setup.
+
+### Prerequisites
+
+- Docker Desktop (or Docker Engine + Compose)
+
+### One command
+
+```bash
+git clone <your-fork-or-repo-url>
+cd omega
+chmod +x scripts/run-anywhere.sh
+./scripts/run-anywhere.sh
+```
+
+Open: **http://127.0.0.1:8765**
+
+### Manual Docker commands
+
+```bash
+# Build and run in background
+docker compose up --build -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+```
+
+Reports/history are persisted in a Docker volume: `omega-data`.
+
 ## Open the final outcome
 
 | File | Audience |
@@ -124,6 +158,7 @@ cd dashboard && npm run dev      # UI only, port 5173
 - Python 3.10+
 - `git` on PATH (for GitHub URLs)
 - Node.js 18+ (to build dashboard, or use `scripts/start-ui.sh` which builds once)
+- Docker (optional, recommended for cross-machine portability)
 
 ## Tests
 

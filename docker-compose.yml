@@ -1,0 +1,16 @@
+services:
+  omega:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: omega-qfm:latest
+    ports:
+      - "8765:8765"
+    environment:
+      - OMEGA_MAX_FILES=350
+    volumes:
+      - omega-data:/root/.omega/data
+    restart: unless-stopped
+
+volumes:
+  omega-data:

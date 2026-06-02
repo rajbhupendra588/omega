@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
+import uuid
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +22,9 @@ from omega.metrics_suite import ensure_report_has_metric_suite
 from omega.developer_guide import ensure_report_has_developer_guide
 from omega.api.delta import build_run_delta
 from omega.api.worker import execute_analysis
-from omega.report import refresh_stored_html_report
+from omega.analyzer import analyze_repository
+from omega.report import outcome_to_report_dict, refresh_stored_html_report
+from omega.scan_config import default_max_files
 
 app = FastAPI(
     title="Omega QFM API",
@@ -48,6 +52,18 @@ class AnalyzeResponse(BaseModel):
     status: str
     message: str
     rerun_of: str | None = None
+
+
+class PlaygroundAnalyzeRequest(BaseModel):
+    code: str = Field(..., min_length=1, description="Code snippet to analyze")
+    language: str = Field(
+        "python",
+        description="Language hint: python, javascript, typescript, java, go, c, cpp, rust, kotlin, csharp",
+    )
+    title: str | None = Field(
+        None,
+        description="Optional snippet name for report display",
+    )
 
 
 class BulkRerunRequest(BaseModel):
@@ -137,6 +153,74 @@ def start_analysis(req: AnalyzeRequest, background_tasks: BackgroundTasks):
         github_url=github_url,
         background_tasks=background_tasks,
     )
+
+
+@app.post("/api/analyze/upload", response_model=AnalyzeResponse)
+async def start_analysis_from_upload(
+    background_tasks: BackgroundTasks, file: UploadFile = File(...)
+):
+    filename = (file.filename or "").strip() or "uploaded-project.zip"
+    if not filename.lower().endswith(".zip"):
+        raise HTTPException(400, "Only .zip files are supported")
+
+    display = Path(filename).stem or "uploaded-project"
+    target = f"upload://{display}"
+    record = store.create(target, display, None)
+
+    run_dir = store.runs_dir / record.id
+    input_dir = run_dir / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = input_dir / "source.zip"
+    zip_data = await file.read()
+    zip_path.write_bytes(zip_data)
+
+    background_tasks.add_task(execute_analysis, store, record.id)
+    return AnalyzeResponse(
+        run_id=record.id,
+        status="pending",
+        message=f"Analysis queued for uploaded archive {filename}",
+    )
+
+
+def _language_extension(language: str) -> str:
+    mapping = {
+        "python": "py",
+        "javascript": "js",
+        "typescript": "ts",
+        "java": "java",
+        "go": "go",
+        "c": "c",
+        "cpp": "cpp",
+        "rust": "rs",
+        "kotlin": "kt",
+        "csharp": "cs",
+    }
+    return mapping.get(language.strip().lower(), "txt")
+
+
+@app.post("/api/playground/analyze")
+def analyze_playground(req: PlaygroundAnalyzeRequest):
+    """Analyze pasted code as a temporary one-file project."""
+    if not req.code.strip():
+        raise HTTPException(400, "Code cannot be empty")
+    run_dir = store.runs_dir / "playground" / uuid.uuid4().hex
+    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        ext = _language_extension(req.language)
+        code_path = run_dir / f"snippet.{ext}"
+        code_path.write_text(req.code, encoding="utf-8")
+        title = (req.title or "Playground snippet").strip() or "Playground snippet"
+        outcome = analyze_repository(
+            run_dir,
+            repo_display=title,
+            github_url=None,
+            max_files=default_max_files(),
+        )
+        return outcome_to_report_dict(outcome)
+    except Exception as e:
+        raise HTTPException(400, f"Playground analysis failed: {e}") from e
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
 
 
 @app.post("/api/runs/{run_id}/rerun", response_model=AnalyzeResponse)
@@ -315,6 +399,7 @@ def export_file(run_id: str, kind: str):
     out = Path(record.output_dir)
     mapping = {
         "html": "omega-report.html",
+        "pdf": "omega-report.pdf",
         "json": "omega-report.json",
         "csv": "omega-files.csv",
         "entities": "omega-entities.csv",
@@ -336,6 +421,7 @@ def export_file(run_id: str, kind: str):
             raise HTTPException(404, "File not found")
     media = {
         "html": "text/html",
+        "pdf": "application/pdf",
         "json": "application/json",
         "csv": "text/csv",
         "entities": "text/csv",

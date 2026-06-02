@@ -33,6 +33,43 @@ export async function startAnalysis(target: string): Promise<AnalyzeStartResult>
   return r.json();
 }
 
+export async function startAnalysisFromZip(file: File): Promise<AnalyzeStartResult> {
+  const form = new FormData();
+  form.append("file", file);
+  const r = await fetch(`${API}/api/analyze/upload`, {
+    method: "POST",
+    body: form,
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }));
+    const d = err.detail;
+    const msg = Array.isArray(d) ? d.map((x: { msg?: string }) => x.msg).join(", ") : d;
+    throw new Error(msg || "Zip analysis failed to start");
+  }
+  return r.json();
+}
+
+export async function analyzePlaygroundCode(input: {
+  code: string;
+  language: string;
+  title?: string;
+}): Promise<FullReport> {
+  const r = await fetch(`${API}/api/playground/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code: input.code,
+      language: input.language,
+      title: input.title,
+    }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(err.detail || "Playground analysis failed");
+  }
+  return r.json();
+}
+
 export async function listRuns(limit = 50): Promise<RunRecord[]> {
   const r = await fetch(`${API}/api/runs?limit=${limit}`);
   if (!r.ok) throw new Error("Failed to load runs");

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import traceback
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,7 +15,34 @@ from omega.report import build_report
 from omega.scan_config import default_max_files
 
 
+_UPLOAD_TARGET_PREFIX = "upload://"
+_UPLOAD_ZIP_NAME = "source.zip"
+
+
+def _safe_extract_zip(zip_path: Path, dest: Path) -> None:
+    """Extract zip to destination while preventing zip-slip traversal."""
+    dest.mkdir(parents=True, exist_ok=True)
+    dest_real = dest.resolve()
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.infolist():
+            member_path = (dest / member.filename).resolve()
+            if not str(member_path).startswith(str(dest_real)):
+                raise ValueError(f"Unsafe zip member path: {member.filename}")
+        zf.extractall(dest)
+
+
 def _resolve_target(target: str, run_dir: Path) -> tuple[Path, str | None, str]:
+    if target.startswith(_UPLOAD_TARGET_PREFIX):
+        zip_path = run_dir / "input" / _UPLOAD_ZIP_NAME
+        if not zip_path.exists():
+            raise FileNotFoundError("Uploaded zip file not found for this run")
+        repo_dest = run_dir / "repo"
+        if repo_dest.exists():
+            shutil.rmtree(repo_dest)
+        _safe_extract_zip(zip_path, repo_dest)
+        display = target.removeprefix(_UPLOAD_TARGET_PREFIX) or "uploaded-project"
+        return repo_dest, None, display
+
     parsed = parse_github_target(target)
     if parsed:
         owner, repo = parsed

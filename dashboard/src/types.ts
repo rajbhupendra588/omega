@@ -265,6 +265,13 @@ export interface FullReport {
   quality_grade: string;
   bayesian_quality: number;
   epistemic_uncertainty: number;
+  scorecard?: {
+    code_quality: number;
+    security: number;
+    performance: number;
+    architecture: number;
+    technical_debt: number;
+  };
   health_summary_technical: string;
   health_summary_business: string;
   file_count: number;
@@ -282,6 +289,7 @@ export interface FullReport {
   entity_summary: Record<string, number>;
   entity_hotspots: string[];
   improvement_plan: ImprovementItem[];
+  suggested_refactorings?: string[];
   entities: EntityMetric[];
   agent_manifest?: AgentManifest;
   metric_suite?: MetricSuite;
