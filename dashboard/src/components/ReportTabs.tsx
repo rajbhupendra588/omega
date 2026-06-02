@@ -16,6 +16,8 @@ import ImplementationBlocks from "./ImplementationBlocks";
 import RerunButton from "./RerunButton";
 import QualityDimensions from "./QualityDimensions";
 import DeveloperGuidePanel from "./DeveloperGuidePanel";
+import AgentOrchestrationPanel from "./AgentOrchestrationPanel";
+import MetricSuitePanel from "./MetricSuitePanel";
 import { exportUrl } from "../api/client";
 import {
   Briefcase,
@@ -26,11 +28,13 @@ import {
   Grid3x3,
   Layers,
   ListChecks,
+  Sigma,
   Table2,
 } from "lucide-react";
 
 type Tab =
   | "overview"
+  | "metrics"
   | "dimensions"
   | "developer"
   | "business"
@@ -48,11 +52,24 @@ export default function ReportTabs({
 }) {
   const [tab, setTab] = useState<Tab>("overview");
   const [entityFilter, setEntityFilter] = useState<string>("all");
+  const [improvementRiskFilter, setImprovementRiskFilter] = useState<string>("all");
   const biz = report.business_report || {};
   const tech = report.technical_report || {};
   const summary = report.entity_summary || {};
   const entities = report.entities || [];
   const plan = report.improvement_plan || [];
+
+  const filteredPlan =
+    improvementRiskFilter === "all"
+      ? plan
+      : plan.filter((item) => item.risk_band === improvementRiskFilter);
+
+  const planByRisk = {
+    CRITICAL: plan.filter((p) => p.risk_band === "CRITICAL").length,
+    HIGH: plan.filter((p) => p.risk_band === "HIGH").length,
+    MEDIUM: plan.filter((p) => p.risk_band === "MEDIUM").length,
+    LOW: plan.filter((p) => p.risk_band === "LOW").length,
+  };
 
   const filteredEntities =
     entityFilter === "all"
@@ -77,12 +94,14 @@ export default function ReportTabs({
   }));
 
   const dims = report.dimensions || [];
+  const metricCount = report.metric_suite?.metric_count ?? 0;
 
   const devGuide = report.developer_guide;
   const devCount = devGuide?.action_count ?? devGuide?.actions?.length ?? 0;
 
   const tabs: { id: Tab; label: string; icon: typeof Briefcase }[] = [
     { id: "overview", label: "Overview", icon: Table2 },
+    { id: "metrics", label: `Metrics (${metricCount})`, icon: Sigma },
     { id: "developer", label: `Developer (${devCount})`, icon: Code2 },
     { id: "dimensions", label: `Dimensions (${dims.length})`, icon: Grid3x3 },
     { id: "improvements", label: `Improvements (${plan.length})`, icon: ListChecks },
@@ -119,6 +138,10 @@ export default function ReportTabs({
             <p className="mt-1 text-sm text-omega-muted">{report.analyzed_at}</p>
             <div className="mt-3 flex items-center gap-3">
               <GradeBadge grade={report.quality_grade} />
+              <p className="max-w-xs text-xs text-omega-muted">
+                Grade from Ω index on source files only — dimension scores are contextual and
+                not every lens applies to every repo.
+              </p>
               <div className="text-sm">
                 <p>
                   Bayesian Q{" "}
@@ -196,6 +219,7 @@ export default function ReportTabs({
             </p>
             <p className="mt-3 text-slate-200">{report.health_summary_technical}</p>
           </div>
+          <AgentOrchestrationPanel manifest={report.agent_manifest} />
           <div className="glass-card col-span-full p-6 lg:col-span-2">
             <h3 className="font-display font-semibold text-white">
               Top modules by Ω (risk)
@@ -278,6 +302,12 @@ export default function ReportTabs({
         </div>
       )}
 
+      {tab === "metrics" && (
+        <div className="glass-card p-6">
+          <MetricSuitePanel suite={report.metric_suite} />
+        </div>
+      )}
+
       {tab === "dimensions" && (
         <div className="glass-card p-6">
           <QualityDimensions
@@ -291,20 +321,48 @@ export default function ReportTabs({
         <div className="space-y-4">
           <div className="glass-card p-6">
             <h3 className="font-display text-lg font-semibold text-white">
-              Implementation guide (this repository)
+              All symbol improvement areas
             </h3>
             <p className="mt-2 text-sm text-omega-muted">
-              Concrete refactors with your file paths, symbol names, and code you
-              can apply in this codebase — not generic advice.
+              Every measured class, method, function, and field — ordered
+              CRITICAL → HIGH → MEDIUM → LOW. Includes maintenance notes for
+              healthy (LOW) symbols.
             </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {(
+                [
+                  ["all", `All (${plan.length})`],
+                  ["CRITICAL", `Critical (${planByRisk.CRITICAL})`],
+                  ["HIGH", `High (${planByRisk.HIGH})`],
+                  ["MEDIUM", `Medium (${planByRisk.MEDIUM})`],
+                  ["LOW", `Low (${planByRisk.LOW})`],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setImprovementRiskFilter(id)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
+                    improvementRiskFilter === id
+                      ? "bg-blue-600/30 text-white ring-1 ring-blue-500/50"
+                      : "bg-slate-800/80 text-omega-muted hover:text-white"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
-          {plan.length === 0 ? (
+          {filteredPlan.length === 0 ? (
             <div className="glass-card p-8 text-center text-omega-muted">
-              No urgent symbol-level improvements detected.
+              No symbols match this risk filter.
             </div>
           ) : (
-            plan.map((item) => (
-              <div key={item.qualified_name} className="glass-card p-6">
+            filteredPlan.map((item) => (
+              <div
+                key={`${item.qualified_name}-${item.lines}`}
+                className="glass-card p-6"
+              >
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <span className="rounded-md bg-blue-500/20 px-2 py-0.5 text-xs font-semibold uppercase text-blue-300">
@@ -341,7 +399,10 @@ export default function ReportTabs({
                     </ul>
                   </div>
                 </div>
-                <ImplementationBlocks blocks={item.implementation_plan || []} />
+                <ImplementationBlocks
+                  diffs={item.implementation_diffs}
+                  blocks={item.implementation_plan || []}
+                />
               </div>
             ))
           )}

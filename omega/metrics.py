@@ -11,6 +11,8 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from omega.parse_util import parse_python
+
 
 @dataclass(frozen=True)
 class FileMetrics:
@@ -113,12 +115,13 @@ def _imports(path: Path, tree: ast.AST) -> set[str]:
 
 
 def _coupling_graph(files: list[Path], sources: dict[Path, str]) -> tuple[dict[Path, set[str]], dict[Path, set[str]]]:
-    module_names = {p.stem for p in files}
+    stem_to_path = {p.stem: p for p in files}
+    module_names = set(stem_to_path.keys())
     out_edges: dict[Path, set[str]] = {p: set() for p in files}
     in_edges: dict[Path, set[str]] = {p: set() for p in files}
     for path in files:
         try:
-            tree = ast.parse(sources[path], filename=str(path))
+            tree = parse_python(sources[path], filename=str(path))
         except SyntaxError:
             continue
         for node in ast.walk(tree):
@@ -126,17 +129,13 @@ def _coupling_graph(files: list[Path], sources: dict[Path, str]) -> tuple[dict[P
                 mod = node.module.split(".")[-1]
                 if mod in module_names and mod != path.stem:
                     out_edges[path].add(mod)
-                    for target in files:
-                        if target.stem == mod:
-                            in_edges[target].add(path.stem)
+                    in_edges[stem_to_path[mod]].add(path)
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     mod = alias.name.split(".")[-1]
                     if mod in module_names and mod != path.stem:
                         out_edges[path].add(mod)
-                        for target in files:
-                            if target.stem == mod:
-                                in_edges[target].add(path.stem)
+                        in_edges[stem_to_path[mod]].add(path)
     return out_edges, in_edges
 
 
@@ -180,7 +179,7 @@ def compute_file_metrics(
     coupling_out: int,
     coupling_in: int,
 ) -> FileMetrics:
-    tree = ast.parse(source, filename=str(path))
+    tree = parse_python(source, filename=str(path))
     cyclomatic, nesting = _cyclomatic_and_nesting(tree)
     h_struct = _structural_entropy(tree)
     h_text = _textual_entropy(source)

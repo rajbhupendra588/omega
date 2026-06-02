@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import ast
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from omega.implementation import build_implementation_plan
+from omega.scan_config import impl_plan_max_entities, max_entities_per_file
 from omega.metrics import _compression_ratio, _omega_local, _risk_band, _structural_entropy, _textual_entropy
+from omega.parse_util import parse_python
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,7 @@ class EntityMetrics:
     improvement_areas_business: tuple[str, ...] = ()
     implementation_plan: tuple[str, ...] = ()
     implementation_summary: tuple[str, ...] = ()
+    implementation_diffs: tuple[dict, ...] = ()
     parent_class: str | None = None
     parameter_count: int = 0
     method_count: int = 0
@@ -147,7 +150,7 @@ def _attach_implementation(
     class_node: ast.ClassDef | None = None,
     methods: list[ast.FunctionDef | ast.AsyncFunctionDef] | None = None,
     field_names: list[str] | None = None,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[dict, ...]]:
     return build_implementation_plan(
         entity_type=entity_type,
         file_path=file_path,
@@ -174,12 +177,16 @@ def _score_entity(
     nesting: int,
     loc: int,
     coupling_bonus: int = 0,
+    *,
+    node: ast.AST | None = None,
     source_snippet: str = "",
 ) -> float:
     h = 0.0
-    if source_snippet:
+    if node is not None:
+        h = _structural_entropy(node)
+    elif source_snippet:
         try:
-            h = _structural_entropy(ast.parse(source_snippet))
+            h = _structural_entropy(parse_python(source_snippet))
         except SyntaxError:
             h = _textual_entropy(source_snippet) * 0.7
     compress = _compression_ratio(source_snippet) if source_snippet else 2.0
@@ -191,8 +198,11 @@ def _score_entity(
     return round(base, 2)
 
 
-def analyze_python_entities(file_path: str, source: str) -> list[EntityMetrics]:
-    tree = ast.parse(source, filename=file_path)
+def analyze_python_entities(
+    file_path: str, source: str, tree: ast.AST | None = None
+) -> list[EntityMetrics]:
+    if tree is None:
+        tree = parse_python(source, filename=file_path)
     entities: list[EntityMetrics] = []
     module_name = file_path.replace("/", ".").replace("\\", ".").removesuffix(".py")
 
@@ -226,9 +236,16 @@ def analyze_python_entities(file_path: str, source: str) -> list[EntityMetrics]:
                 field_count=fields,
                 name=node.name,
             )
-            omega = _score_entity("class", cyc, nest, loc, source_snippet=_source_slice(source, node))
+            omega = _score_entity(
+                "class",
+                cyc,
+                nest,
+                loc,
+                node=node,
+                source_snippet=_source_slice(source, node),
+            )
             band = _risk_band(omega)
-            impl_md, impl_sum = _attach_implementation(
+            impl_md, impl_sum, impl_diffs = _attach_implementation(
                 entity_type="class",
                 file_path=file_path,
                 language="python",
@@ -260,6 +277,7 @@ def analyze_python_entities(file_path: str, source: str) -> list[EntityMetrics]:
                     improvement_areas_business=biz,
                     implementation_plan=impl_md,
                     implementation_summary=impl_sum,
+                    implementation_diffs=tuple(impl_diffs),
                     method_count=len(methods),
                     field_count=fields,
                 )
@@ -302,9 +320,9 @@ def _method_entity(
         name=node.name,
     )
     snippet = _source_slice(source, node)
-    omega = _score_entity(etype, cyc, nest, loc, source_snippet=snippet)
+    omega = _score_entity(etype, cyc, nest, loc, node=node, source_snippet=snippet)
     band = _risk_band(omega)
-    impl_md, impl_sum = _attach_implementation(
+    impl_md, impl_sum, impl_diffs = _attach_implementation(
         entity_type=etype,
         file_path=file_path,
         language="python",
@@ -332,6 +350,7 @@ def _method_entity(
         improvement_areas_business=biz,
         implementation_plan=impl_md,
         implementation_summary=impl_sum,
+        implementation_diffs=tuple(impl_diffs),
         parent_class=parent,
         parameter_count=params,
     )
@@ -391,9 +410,9 @@ def _field_entity(
     qname = f"{module}.{class_name}.{field_name}"
     tech, biz = _improvements("field", cyclomatic=cyc, nesting=nest, loc=loc, name=field_name)
     snippet = _source_slice(source, node)
-    omega = _score_entity("field", cyc, nest, loc, source_snippet=snippet)
+    omega = _score_entity("field", cyc, nest, loc, node=node, source_snippet=snippet)
     band = _risk_band(omega)
-    impl_md, impl_sum = _attach_implementation(
+    impl_md, impl_sum, impl_diffs = _attach_implementation(
         entity_type="field",
         file_path=file_path,
         language="python",
@@ -420,6 +439,7 @@ def _field_entity(
         improvement_areas_business=biz,
         implementation_plan=impl_md,
         implementation_summary=impl_sum,
+        implementation_diffs=tuple(impl_diffs),
         parent_class=class_name,
     )
 
@@ -438,15 +458,76 @@ _JAVA_METHOD_RE = re.compile(
     r"^\s*(?:public|private|protected|static|\s)+[\w<>\[\],\s]+\s+(\w+)\s*\([^)]*\)\s*\{",
     re.M,
 )
-_FIELD_RE = re.compile(
-    r"^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:readonly\s+)?(\w+)\s*[=:;]",
-    re.M,
+_GO_TYPE_RE = re.compile(r"^\s*type\s+(\w+)\s+struct\b", re.M)
+_GO_FUNC_RE = re.compile(r"^\s*func\s+(?:\([^)]+\)\s+)?(\w+)\s*\(", re.M)
+_RUST_FN_RE = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(", re.M)
+_RUST_STRUCT_RE = re.compile(r"^\s*(?:pub\s+)?struct\s+(\w+)\b", re.M)
+
+# Languages with regex symbol extraction + implementation sketches (not full AST).
+HEURISTIC_ENTITY_LANGUAGES = frozenset(
+    {
+        "javascript",
+        "typescript",
+        "kotlin",
+        "csharp",
+        "rust",
+        "ruby",
+        "php",
+        "scala",
+        "cpp",
+        "c",
+        "objc",
+        "vue",
+    }
 )
 
 
 def _line_range(source: str, start_line: int, approx_lines: int) -> tuple[int, int]:
     end = min(len(source.splitlines()), start_line + approx_lines - 1)
     return start_line, end
+
+
+def _heuristic_entity(
+    *,
+    entity_type: str,
+    file_path: str,
+    language: str,
+    source: str,
+    chunk: str,
+    qualified_name: str,
+    line_start: int,
+    line_end: int,
+    loc: int,
+    cyclomatic: int,
+    nesting: int,
+    omega: float,
+    tech: tuple[str, ...],
+    biz: tuple[str, ...],
+    parent_class: str | None = None,
+    parameter_count: int = 0,
+    method_count: int = 0,
+    field_count: int = 0,
+) -> EntityMetrics:
+    """Build heuristic symbol metrics with repo-context implementation + business text."""
+    band = _risk_band(omega)
+    return EntityMetrics(
+        entity_type=entity_type,
+        qualified_name=qualified_name,
+        file_path=file_path,
+        line_start=line_start,
+        line_end=line_end,
+        loc=loc,
+        cyclomatic=cyclomatic,
+        nesting_depth=nesting,
+        omega_local=omega,
+        risk_band=band,
+        improvement_areas=tech,
+        improvement_areas_business=biz,
+        parent_class=parent_class,
+        parameter_count=parameter_count,
+        method_count=method_count,
+        field_count=field_count,
+    )
 
 
 def analyze_heuristic_entities(file_path: str, source: str, language: str) -> list[EntityMetrics]:
@@ -481,61 +562,205 @@ def analyze_heuristic_entities(file_path: str, source: str, language: str) -> li
         )
         omega = _score_entity("class", cyc + 1, nest, loc, source_snippet=chunk)
         entities.append(
-            EntityMetrics(
+            _heuristic_entity(
                 entity_type="class",
-                qualified_name=f"{module}.{cname}",
                 file_path=file_path,
+                language=language,
+                source=source,
+                chunk=chunk,
+                qualified_name=f"{module}.{cname}",
                 line_start=start,
                 line_end=end,
                 loc=loc,
                 cyclomatic=cyc + 1,
-                nesting_depth=nest,
-                omega_local=omega,
-                risk_band=_risk_band(omega),
-                improvement_areas=tech,
-                improvement_areas_business=biz,
+                nesting=nest,
+                omega=omega,
+                tech=tech,
+                biz=biz,
                 method_count=methods,
                 field_count=fields,
             )
         )
 
+    seen_funcs: set[str] = set()
+
+    def _add_function(fname: str, start_line: int, chunk: str, end_line: int) -> None:
+        if fname in seen_funcs or fname in ("if", "for", "while", "switch", "catch"):
+            return
+        seen_funcs.add(fname)
+        cyc = len(re.findall(r"\b(if|for|while|else|case|catch)\b", chunk)) + 1
+        loc = end_line - start_line + 1
+        tech, biz = _improvements("function", cyclomatic=cyc, nesting=2, loc=loc, name=fname)
+        omega = _score_entity("function", cyc, 2, loc, source_snippet=chunk)
+        entities.append(
+            _heuristic_entity(
+                entity_type="function",
+                file_path=file_path,
+                language=language,
+                source=source,
+                chunk=chunk,
+                qualified_name=f"{module}.{fname}",
+                line_start=start_line,
+                line_end=end_line,
+                loc=loc,
+                cyclomatic=cyc,
+                nesting=2,
+                omega=omega,
+                tech=tech,
+                biz=biz,
+            )
+        )
+
     for i, line in enumerate(lines, start=1):
-        if re.match(r"^\s*(function\s+\w+|async\s+function\s+\w+|\w+\s*\([^)]*\)\s*\{)", line):
-            name_m = re.search(r"(?:function\s+)?(\w+)\s*\(", line)
-            if not name_m:
-                continue
-            fname = name_m.group(1)
-            if fname in ("if", "for", "while", "switch"):
-                continue
-            end = min(i + 40, len(lines))
-            chunk = "\n".join(lines[i - 1 : end])
-            cyc = len(re.findall(r"\b(if|for|while|else|case|catch)\b", chunk)) + 1
-            loc = end - i + 1
-            tech, biz = _improvements("function", cyclomatic=cyc, nesting=2, loc=loc, name=fname)
-            omega = _score_entity("function", cyc, 2, loc, source_snippet=chunk)
+        patterns = [
+            r"^\s*(?:(?:export\s+)?(?:default\s+)?)?(?:async\s+)?function\s+(\w+)",
+            r"^\s*(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>",
+            r"^\s*(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?function\s*\(",
+        ]
+        fname: str | None = None
+        for pat in patterns:
+            m = re.match(pat, line)
+            if m:
+                fname = m.group(1)
+                break
+        if not fname:
+            if re.match(
+                r"^\s*(?:(?:export|default)\s+)?(?:async\s+)?function\s+\w+|\w+\s*\([^)]*\)\s*\{",
+                line,
+            ):
+                name_m = re.search(r"(?:function\s+)?(\w+)\s*\(", line)
+                if name_m:
+                    fname = name_m.group(1)
+        if not fname:
+            continue
+        end = min(i + 80, len(lines))
+        chunk = "\n".join(lines[i - 1 : end])
+        _add_function(fname, i, chunk, end)
+
+    if language == "go":
+        for m in _GO_TYPE_RE.finditer(source):
+            start = source[: m.start()].count("\n") + 1
+            tname = m.group(1)
+            end = min(start + 40, len(lines))
+            chunk = "\n".join(lines[start - 1 : end])
+            cyc = len(re.findall(r"\b(if|for|range|switch|case)\b", chunk)) + 1
+            loc = end - start + 1
+            tech, biz = _improvements(
+                "class", cyclomatic=cyc, nesting=2, loc=loc, name=tname, method_count=3
+            )
+            omega = _score_entity("class", cyc, 2, loc, source_snippet=chunk)
             entities.append(
-                EntityMetrics(
-                    entity_type="function",
-                    qualified_name=f"{module}.{fname}",
+                _heuristic_entity(
+                    entity_type="class",
                     file_path=file_path,
-                    line_start=i,
+                    language=language,
+                    source=source,
+                    chunk=chunk,
+                    qualified_name=f"{module}.{tname}",
+                    line_start=start,
                     line_end=end,
                     loc=loc,
                     cyclomatic=cyc,
-                    nesting_depth=2,
-                    omega_local=omega,
-                    risk_band=_risk_band(omega),
-                    improvement_areas=tech,
-                    improvement_areas_business=biz,
+                    nesting=2,
+                    omega=omega,
+                    tech=tech,
+                    biz=biz,
+                )
+            )
+        for m in _GO_FUNC_RE.finditer(source):
+            start = source[: m.start()].count("\n") + 1
+            fname = m.group(1)
+            if fname in ("if", "for", "switch"):
+                continue
+            end = min(start + 45, len(lines))
+            chunk = "\n".join(lines[start - 1 : end])
+            cyc = len(re.findall(r"\b(if|for|range|switch|case)\b", chunk)) + 1
+            loc = end - start + 1
+            tech, biz = _improvements("function", cyclomatic=cyc, nesting=2, loc=loc, name=fname)
+            omega = _score_entity("function", cyc, 2, loc, source_snippet=chunk)
+            entities.append(
+                _heuristic_entity(
+                    entity_type="function",
+                    file_path=file_path,
+                    language=language,
+                    source=source,
+                    chunk=chunk,
+                    qualified_name=f"{module}.{fname}",
+                    line_start=start,
+                    line_end=end,
+                    loc=loc,
+                    cyclomatic=cyc,
+                    nesting=2,
+                    omega=omega,
+                    tech=tech,
+                    biz=biz,
                 )
             )
 
-    if language == "java":
+    if language == "rust":
+        for m in _RUST_STRUCT_RE.finditer(source):
+            start = source[: m.start()].count("\n") + 1
+            sname = m.group(1)
+            end = min(start + 40, len(lines))
+            chunk = "\n".join(lines[start - 1 : end])
+            cyc = len(re.findall(r"\b(if|for|while|match|loop)\b", chunk)) + 1
+            loc = end - start + 1
+            tech, biz = _improvements("class", cyclomatic=cyc, nesting=2, loc=loc, name=sname)
+            omega = _score_entity("class", cyc, 2, loc, source_snippet=chunk)
+            entities.append(
+                _heuristic_entity(
+                    entity_type="class",
+                    file_path=file_path,
+                    language=language,
+                    source=source,
+                    chunk=chunk,
+                    qualified_name=f"{module}.{sname}",
+                    line_start=start,
+                    line_end=end,
+                    loc=loc,
+                    cyclomatic=cyc,
+                    nesting=2,
+                    omega=omega,
+                    tech=tech,
+                    biz=biz,
+                )
+            )
+        for m in _RUST_FN_RE.finditer(source):
+            start = source[: m.start()].count("\n") + 1
+            fname = m.group(1)
+            end = min(start + 45, len(lines))
+            chunk = "\n".join(lines[start - 1 : end])
+            cyc = len(re.findall(r"\b(if|for|while|match|loop)\b", chunk)) + 1
+            loc = end - start + 1
+            tech, biz = _improvements("function", cyclomatic=cyc, nesting=2, loc=loc, name=fname)
+            omega = _score_entity("function", cyc, 2, loc, source_snippet=chunk)
+            entities.append(
+                _heuristic_entity(
+                    entity_type="function",
+                    file_path=file_path,
+                    language=language,
+                    source=source,
+                    chunk=chunk,
+                    qualified_name=f"{module}.{fname}",
+                    line_start=start,
+                    line_end=end,
+                    loc=loc,
+                    cyclomatic=cyc,
+                    nesting=2,
+                    omega=omega,
+                    tech=tech,
+                    biz=biz,
+                )
+            )
+
+    if language in ("java", "kotlin", "csharp"):
+        seen_methods: set[str] = set()
         for m in _JAVA_METHOD_RE.finditer(source):
             start = source[: m.start()].count("\n") + 1
             fname = m.group(1)
-            if fname in ("if", "for", "while", "class", "interface"):
+            if fname in ("if", "for", "while", "class", "interface") or fname in seen_methods:
                 continue
+            seen_methods.add(fname)
             end = min(start + 35, len(lines))
             chunk = "\n".join(lines[start - 1 : end])
             cyc = len(re.findall(r"\b(if|for|while|catch|switch)\b", chunk)) + 1
@@ -543,24 +768,106 @@ def analyze_heuristic_entities(file_path: str, source: str, language: str) -> li
             tech, biz = _improvements("method", cyclomatic=cyc, nesting=2, loc=loc, name=fname)
             omega = _score_entity("method", cyc, 2, loc, source_snippet=chunk)
             entities.append(
-                EntityMetrics(
+                _heuristic_entity(
                     entity_type="method",
-                    qualified_name=f"{module}.{fname}",
                     file_path=file_path,
+                    language=language,
+                    source=source,
+                    chunk=chunk,
+                    qualified_name=f"{module}.{fname}",
                     line_start=start,
                     line_end=end,
                     loc=loc,
                     cyclomatic=cyc,
-                    nesting_depth=2,
-                    omega_local=omega,
-                    risk_band=_risk_band(omega),
-                    improvement_areas=tech,
-                    improvement_areas_business=biz,
+                    nesting=2,
+                    omega=omega,
+                    tech=tech,
+                    biz=biz,
                 )
             )
 
-    entities.sort(key=lambda e: e.omega_local, reverse=True)
+    cap = max_entities_per_file()
+    if len(entities) > cap:
+        entities.sort(key=lambda e: e.omega_local, reverse=True)
+        entities = entities[:cap]
     return entities
+
+
+def enrich_implementation_plans(
+    entities: list[EntityMetrics],
+    source_by_path: dict[str, str],
+    *,
+    max_entities: int | None = None,
+) -> list[EntityMetrics]:
+    """
+    Attach implementation plans only to the top-N riskiest symbols (deferred for speed).
+    Symbols that already have plans (e.g. Python AST) are left unchanged.
+    """
+    limit = impl_plan_max_entities() if max_entities is None else max_entities
+    if limit <= 0:
+        return entities
+
+    candidates = [
+        e
+        for e in entities
+        if not e.implementation_plan
+        and e.risk_band in ("CRITICAL", "HIGH", "MEDIUM")
+    ]
+    candidates.sort(key=lambda e: (-e.omega_local, e.qualified_name))
+    enrich_names = {e.qualified_name for e in candidates[:limit]}
+
+    out: list[EntityMetrics] = []
+    for e in entities:
+        if e.qualified_name not in enrich_names:
+            out.append(e)
+            continue
+        src = source_by_path.get(e.file_path, "")
+        impl_md, impl_sum, impl_diffs = build_implementation_plan(
+            entity_type=e.entity_type,
+            file_path=e.file_path,
+            language=_language_for_path(e.file_path),
+            source=src,
+            qualified_name=e.qualified_name,
+            cyclomatic=e.cyclomatic,
+            nesting=e.nesting_depth,
+            loc=e.loc,
+            params=e.parameter_count,
+            method_count=e.method_count,
+            field_count=e.field_count,
+            risk_band=e.risk_band,
+            line_start=e.line_start,
+            line_end=e.line_end,
+        )
+        out.append(
+            replace(
+                e,
+                implementation_plan=impl_md,
+                implementation_summary=impl_sum,
+                implementation_diffs=tuple(impl_diffs),
+            )
+        )
+    return out
+
+
+def _language_for_path(file_path: str) -> str:
+    low = file_path.lower()
+    if low.endswith(".java"):
+        return "java"
+    if low.endswith(".py"):
+        return "python"
+    if low.endswith(".go"):
+        return "go"
+    if low.endswith((".ts", ".tsx")):
+        return "typescript"
+    if low.endswith((".js", ".jsx")):
+        return "javascript"
+    if low.endswith(".kt"):
+        return "kotlin"
+    if low.endswith(".rs"):
+        return "rust"
+    if low.endswith(".cs"):
+        return "csharp"
+    return "unknown"
 
 
 def analyze_file_entities(file_path: str, source: str, language: str) -> list[EntityMetrics]:
@@ -569,6 +876,17 @@ def analyze_file_entities(file_path: str, source: str, language: str) -> list[En
             return analyze_python_entities(file_path, source)
         except SyntaxError:
             return analyze_heuristic_entities(file_path, source, language)
-    if language in ("javascript", "typescript", "java", "kotlin", "csharp", "go", "rust"):
+    if language in ("java", "go"):
+        from omega.ast_tree_sitter import parse_tree
+        from omega.entities_ts import analyze_ts_entities
+
+        tree = parse_tree(language, source)
+        if tree is not None:
+            try:
+                return analyze_ts_entities(file_path, source, language, tree)
+            except ValueError:
+                pass
+        return analyze_heuristic_entities(file_path, source, language)
+    if language in HEURISTIC_ENTITY_LANGUAGES:
         return analyze_heuristic_entities(file_path, source, language)
     return []

@@ -13,6 +13,7 @@ from omega.metrics import FileMetrics
 from omega.developer_guide import build_developer_guide
 from omega.dimensions import build_repo_dimensions
 from omega.narrative import build_business_sections, build_technical_sections
+from omega.metrics_suite import build_metrics_suite
 from omega.scan import scan_repository
 
 
@@ -47,6 +48,8 @@ class RepositoryOutcome:
     improvement_plan: list[dict] = field(default_factory=list)
     developer_guide: dict = field(default_factory=dict)
     dimensions: list[dict] = field(default_factory=list)
+    metric_suite: dict = field(default_factory=dict)
+    agent_manifest: dict = field(default_factory=dict)
 
 
 def _grade(omega: float) -> str:
@@ -140,37 +143,37 @@ def _entity_summary(entities: list[EntityMetrics]) -> dict[str, int]:
     return summary
 
 
-def _improvement_plan(entities: list[EntityMetrics], limit: int = 40) -> list[dict]:
-    plan: list[dict] = []
-    for e in entities:
-        if e.risk_band not in ("MEDIUM", "HIGH", "CRITICAL"):
-            if not e.implementation_plan:
-                continue
-        if (
-            not e.implementation_plan
-            and e.improvement_areas
-            and e.improvement_areas[0].startswith("Metrics within")
-        ):
-            continue
-        plan.append(
-            {
-                "entity_type": e.entity_type,
-                "qualified_name": e.qualified_name,
-                "file_path": e.file_path,
-                "lines": f"{e.line_start}-{e.line_end}",
-                "omega_local": e.omega_local,
-                "risk_band": e.risk_band,
-                "cyclomatic": e.cyclomatic,
-                "nesting_depth": e.nesting_depth,
-                "improvement_areas": list(e.improvement_areas),
-                "improvement_areas_business": list(e.improvement_areas_business),
-                "implementation_plan": list(e.implementation_plan),
-                "implementation_summary": list(e.implementation_summary),
-            }
-        )
-        if len(plan) >= limit:
-            break
-    return plan
+_RISK_SORT_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+
+
+def _improvement_plan(entities: list[EntityMetrics]) -> list[dict]:
+    """All symbols with improvement areas, ordered CRITICAL → HIGH → MEDIUM → LOW."""
+    ordered = sorted(
+        entities,
+        key=lambda e: (
+            _RISK_SORT_ORDER.get(e.risk_band, 99),
+            -e.omega_local,
+            e.qualified_name,
+        ),
+    )
+    return [
+        {
+            "entity_type": e.entity_type,
+            "qualified_name": e.qualified_name,
+            "file_path": e.file_path,
+            "lines": f"{e.line_start}-{e.line_end}",
+            "omega_local": e.omega_local,
+            "risk_band": e.risk_band,
+            "cyclomatic": e.cyclomatic,
+            "nesting_depth": e.nesting_depth,
+            "improvement_areas": list(e.improvement_areas),
+            "improvement_areas_business": list(e.improvement_areas_business),
+            "implementation_plan": list(e.implementation_plan),
+            "implementation_summary": list(e.implementation_summary),
+            "implementation_diffs": [dict(d) for d in e.implementation_diffs],
+        }
+        for e in ordered
+    ]
 
 
 def _entity_hotspots(entities: list[EntityMetrics], limit: int = 20) -> list[str]:
@@ -226,13 +229,19 @@ def _recommendations(
         )
     for e in entities[:8]:
         if e.risk_band in ("HIGH", "CRITICAL"):
+            tech_note = e.improvement_areas[0] if e.improvement_areas else "elevated structural stress"
+            biz_note = (
+                e.improvement_areas_business[0]
+                if e.improvement_areas_business
+                else "simplify before adding features"
+            )
             tech.append(
                 f"[{e.entity_type}] `{e.qualified_name}` @ {e.file_path}:{e.line_start} — "
-                f"Ω={e.omega_local}: {e.improvement_areas[0]}"
+                f"Ω={e.omega_local}: {tech_note}"
             )
             biz.append(
                 f"Fix {e.entity_type} '{e.qualified_name.split('.')[-1]}' in {e.file_path} — "
-                f"{e.improvement_areas_business[0]}"
+                f"{biz_note}"
             )
     if not tech:
         tech.append("Maintain current structure; re-run Ω analysis on each significant PR.")
@@ -252,9 +261,12 @@ def analyze_repository(
     *,
     github_url: str | None = None,
     repo_display: str | None = None,
+    max_files: int | None = None,
 ) -> RepositoryOutcome:
     root_path = Path(root).resolve()
-    files, entities, inventory = scan_repository(root_path)
+    files, entities, inventory, manifest = scan_repository(
+        root_path, max_files=max_files
+    )
 
     display = repo_display or root_path.name
     analyzed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -281,8 +293,15 @@ def analyze_repository(
         )
         outcome.business = build_business_sections(outcome)
         outcome.technical = build_technical_sections(outcome)
-        outcome.dimensions = [d.to_dict() for d in build_repo_dimensions(outcome)]
         outcome.developer_guide = build_developer_guide(outcome)
+        outcome.agent_manifest = manifest.to_dict()
+        outcome.metric_suite = build_metrics_suite(
+            root_path, outcome, inventory=empty_inv
+        )
+        outcome.dimensions = [
+            d.to_dict()
+            for d in build_repo_dimensions(outcome, root=str(root_path))
+        ]
         return outcome
 
     omega_index = round(sum(f.omega_local for f in files) / len(files), 2)
@@ -325,8 +344,15 @@ def analyze_repository(
         improvement_plan=ent_plan,
         dimensions=[],
     )
-    outcome.dimensions = [d.to_dict() for d in build_repo_dimensions(outcome)]
     outcome.developer_guide = build_developer_guide(outcome)
     outcome.business = build_business_sections(outcome)
     outcome.technical = build_technical_sections(outcome)
+    outcome.agent_manifest = manifest.to_dict()
+    outcome.metric_suite = build_metrics_suite(
+        root_path, outcome, inventory=inventory
+    )
+    outcome.dimensions = [
+        d.to_dict()
+        for d in build_repo_dimensions(outcome, root=str(root_path))
+    ]
     return outcome

@@ -316,19 +316,22 @@ class RunStore:
         r = self.get(run_id)
         if not r:
             return False
+        self._remove_run_record(run_id, r.repo_key)
+        return True
+
+    def _remove_run_record(self, run_id: str, repo_key: str) -> None:
         run_dir = self.runs_dir / run_id
         if run_dir.exists():
             shutil.rmtree(run_dir)
         if run_id in self._index:
             self._index.remove(run_id)
             self._save_index()
-        key = r.repo_key
-        if key in self._repos_index and run_id in self._repos_index[key]:
-            self._repos_index[key].remove(run_id)
-            if not self._repos_index[key]:
-                del self._repos_index[key]
+        if repo_key in self._repos_index and run_id in self._repos_index[repo_key]:
+            self._repos_index[repo_key].remove(run_id)
+            if not self._repos_index[repo_key]:
+                del self._repos_index[repo_key]
             else:
-                ids = self._repos_index[key]
+                ids = self._repos_index[repo_key]
                 n = len(ids)
                 for i, rid in enumerate(ids):
                     rec = self.get(rid)
@@ -336,4 +339,36 @@ class RunStore:
                         rec.run_number = n - i
                         self._write(rec)
             self._save_repos_index()
-        return True
+
+    def delete_runs_for_repo(
+        self, repo_key: str, *, include_in_progress: bool = False
+    ) -> tuple[list[str], list[str]]:
+        """Returns (deleted_run_ids, skipped_run_ids)."""
+        ids = list(self._repos_index.get(repo_key, []))
+        deleted: list[str] = []
+        skipped: list[str] = []
+        for run_id in ids:
+            r = self.get(run_id)
+            if not r:
+                continue
+            if not include_in_progress and r.status in ("pending", "running"):
+                skipped.append(run_id)
+                continue
+            self._remove_run_record(run_id, repo_key)
+            deleted.append(run_id)
+        return deleted, skipped
+
+    def delete_all_runs(self, *, include_in_progress: bool = False) -> tuple[list[str], list[str]]:
+        """Purge every stored run. Returns (deleted_run_ids, skipped_run_ids)."""
+        deleted: list[str] = []
+        skipped: list[str] = []
+        for run_id in list(self._index):
+            r = self.get(run_id)
+            if not r:
+                continue
+            if not include_in_progress and r.status in ("pending", "running"):
+                skipped.append(run_id)
+                continue
+            self._remove_run_record(run_id, r.repo_key)
+            deleted.append(run_id)
+        return deleted, skipped

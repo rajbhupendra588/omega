@@ -66,6 +66,57 @@ export async function getRun(id: string): Promise<RunRecord> {
   return r.json();
 }
 
+export interface RunDeltaPayload {
+  current_run_id: string;
+  baseline_run_id: string;
+  baseline_analyzed_at?: string;
+  baseline_created_at?: string | null;
+  summary: string;
+  omega_index: {
+    current: number;
+    baseline: number;
+    delta: number;
+    improved: boolean;
+  };
+  quality_grade: {
+    current: string;
+    baseline: string;
+    improved: boolean | null;
+  };
+  file_count: { current: number; baseline: number; delta: number | null };
+  total_loc: { current: number; baseline: number; delta: number | null };
+  entity_high_risk: { current: number; baseline: number; delta: number | null };
+  files_improved: {
+    path: string;
+    omega_delta: number;
+    current_omega: number;
+    baseline_omega: number;
+  }[];
+  files_regressed: {
+    path: string;
+    omega_delta: number;
+    current_omega: number;
+    baseline_omega: number;
+  }[];
+}
+
+export type RunDeltaResponse =
+  | { has_baseline: false; message: string }
+  | { has_baseline: true; delta: RunDeltaPayload };
+
+export async function getRunDelta(
+  runId: string,
+  baselineRunId?: string
+): Promise<RunDeltaResponse> {
+  const q = baselineRunId ? `?baseline_run_id=${encodeURIComponent(baselineRunId)}` : "";
+  const r = await fetch(`${API}/api/runs/${runId}/delta${q}`);
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || "Delta not available");
+  }
+  return r.json();
+}
+
 export async function getReport(id: string): Promise<FullReport> {
   const r = await fetch(`${API}/api/runs/${id}/report`);
   if (!r.ok) {
@@ -75,9 +126,47 @@ export async function getReport(id: string): Promise<FullReport> {
   return r.json();
 }
 
-export async function deleteRun(id: string): Promise<void> {
-  const r = await fetch(`${API}/api/runs/${id}`, { method: "DELETE" });
-  if (!r.ok) throw new Error("Delete failed");
+export interface PurgeResult {
+  deleted: string[];
+  skipped: string[];
+  message: string;
+}
+
+export async function deleteRun(
+  id: string,
+  includeInProgress = false
+): Promise<{ deleted: string; message: string }> {
+  const q = includeInProgress ? "?include_in_progress=true" : "";
+  const r = await fetch(`${API}/api/runs/${id}${q}`, { method: "DELETE" });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(err.detail || "Purge failed");
+  }
+  return r.json();
+}
+
+export async function purgeAllRuns(includeInProgress = false): Promise<PurgeResult> {
+  const q = includeInProgress ? "?include_in_progress=true" : "";
+  const r = await fetch(`${API}/api/runs${q}`, { method: "DELETE" });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(err.detail || "Purge all failed");
+  }
+  return r.json();
+}
+
+export async function purgeRepoRuns(
+  repoKey: string,
+  includeInProgress = false
+): Promise<PurgeResult> {
+  const enc = encodeURIComponent(repoKey);
+  const q = includeInProgress ? "?include_in_progress=true" : "";
+  const r = await fetch(`${API}/api/repos/${enc}/runs${q}`, { method: "DELETE" });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(err.detail || "Purge repository failed");
+  }
+  return r.json();
 }
 
 export function exportUrl(runId: string, kind: string): string {

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { deleteRun, getRunHistory, listRepos } from "../api/client";
+import { getRunHistory, listRepos } from "../api/client";
 import type { RepoSummary, RunRecord } from "../types";
 import GradeBadge from "../components/GradeBadge";
 import RerunButton from "../components/RerunButton";
 import BulkRerunBar from "../components/BulkRerunBar";
+import { PurgeAllButton, PurgeRepoButton, PurgeRunButton } from "../components/PurgeReportsBar";
 import {
   ArrowRight,
   ChevronDown,
@@ -13,7 +14,6 @@ import {
   History,
   Loader2,
   Plus,
-  Trash2,
   AlertCircle,
   CheckCircle2,
 } from "lucide-react";
@@ -55,14 +55,6 @@ export default function DashboardPage() {
     } catch {
       /* ignore */
     }
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!confirm("Delete this analysis run?")) return;
-    await deleteRun(id);
-    setExpanded({});
-    setOpenRepo(null);
-    load();
   };
 
   const totalRuns = repos.reduce((n, r) => n + r.run_count, 0);
@@ -114,7 +106,20 @@ export default function DashboardPage() {
       </div>
 
       {!loading && repos.length > 0 && (
-        <BulkRerunBar repos={repos} recentLimit={10} onDone={load} />
+        <div className="flex flex-wrap items-stretch gap-3">
+          <div className="min-w-0 flex-1">
+            <BulkRerunBar repos={repos} recentLimit={10} onDone={load} />
+          </div>
+          <div className="flex items-center rounded-xl border border-red-500/20 bg-red-500/5 px-4">
+            <PurgeAllButton
+              onDone={() => {
+                setExpanded({});
+                setOpenRepo(null);
+                load();
+              }}
+            />
+          </div>
+        </div>
       )}
 
       <div className="glass-card overflow-hidden">
@@ -213,7 +218,19 @@ export default function DashboardPage() {
                     )}
                   </div>
                   {isOpen && runs && (
-                    <ul className="mt-4 ml-8 space-y-2 border-l border-omega-border pl-4">
+                    <div className="mt-4 ml-8 flex flex-wrap items-center gap-2 border-l border-omega-border pl-4">
+                      <PurgeRepoButton
+                        repo={repo}
+                        onDone={() => {
+                          setExpanded({});
+                          setOpenRepo(null);
+                          load();
+                        }}
+                      />
+                    </div>
+                  )}
+                  {isOpen && runs && (
+                    <ul className="mt-2 ml-8 space-y-2 border-l border-omega-border pl-4">
                       {runs.map((run) => (
                         <li
                           key={run.id}
@@ -251,14 +268,23 @@ export default function DashboardPage() {
                               }}
                             />
                           )}
-                          <button
-                            type="button"
-                            onClick={() => handleDelete(run.id)}
+                          <PurgeRunButton
+                            runId={run.id}
+                            label=""
                             className="btn-ghost p-1 text-red-400/80"
-                            aria-label="Delete run"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                            onDone={() => {
+                              setExpanded((prev) => {
+                                const next = { ...prev };
+                                if (next[repo.repo_key]) {
+                                  next[repo.repo_key] = next[repo.repo_key].filter(
+                                    (r) => r.id !== run.id
+                                  );
+                                }
+                                return next;
+                              });
+                              load();
+                            }}
+                          />
                         </li>
                       ))}
                     </ul>

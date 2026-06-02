@@ -116,18 +116,20 @@ def build_business_sections(outcome: "RepositoryOutcome") -> dict[str, str | lis
     ] + outcome.recommendations_business
 
     sections["entity_improvement_plan"] = [
-        f"{item['qualified_name']} ({item['entity_type']}, lines {item['lines']}): "
-        f"{item['improvement_areas_business'][0]}"
-        for item in outcome.improvement_plan[:25]
-    ] or ["No class/method/field required urgent changes at symbol level."]
+        f"{item['qualified_name']} ({item['entity_type']}, {item['risk_band']}, lines {item['lines']}): "
+        f"{(item.get('improvement_areas_business') or ['Review symbol metrics.'])[0]}"
+        for item in outcome.improvement_plan
+    ] or ["No symbols measured in this repository."]
 
     sections["for_non_technical_stakeholders"] = (
         "You do **not** need to read cyclomatic complexity or entropy formulas. "
-        "Focus on: (1) Letter grade A–F, (2) Multi-dimensional profile (repo-specific), "
+        "Focus on: (1) Letter grade A–F from the Ω index (not dimension scores), "
+        "(2) Applicable contextual dimensions for this service, "
         "(3) Entity improvement plan, (4) Hotspot file list."
     )
 
-    if outcome.dimensions:
+    app_dims = [d for d in (outcome.dimensions or []) if d.get("applicable", True)]
+    if app_dims:
         sections["quality_dimensions_business"] = [
             f"**{d['name']}** ({d['band']}): {d['summary_business']}"
             + (
@@ -135,11 +137,11 @@ def build_business_sections(outcome: "RepositoryOutcome") -> dict[str, str | lis
                 if d.get("evidence")
                 else ""
             )
-            for d in outcome.dimensions
+            for d in app_dims
         ]
         sections["dimension_actions_business"] = [
             act
-            for d in outcome.dimensions
+            for d in app_dims
             for act in d.get("actions_in_repo", [])[:2]
         ][:12]
 
@@ -207,10 +209,13 @@ def build_technical_sections(outcome: "RepositoryOutcome") -> dict[str, str | li
     ]
 
     sections["methodology"] = [
-        "Python: full AST — every ClassDef, FunctionDef/AsyncFunctionDef, class fields and __init__ self.* assignments.",
+        "Orchestration: MasterAgent discovers tech stack, spawns one language worker per stack "
+        "(parallel by default); manifest stored in agent_manifest.",
+        "Python worker (ast_full): full AST — every ClassDef, FunctionDef/AsyncFunctionDef, fields.",
         "Per-entity cyclomatic and nesting computed on the symbol subtree only.",
         "Improvement areas: rule engine on complexity, length, arity, class method/field counts.",
-        "Other languages: heuristic class/method/field extraction with regex blocks.",
+        "Other languages: regex symbol extraction (class/function/method) with technical + "
+        "business improvement text and language-aware implementation sketches (JS/TS, Java, Go, Rust, etc.).",
         "Coupling graph: directed edges from import/require/include statements to internal module stems.",
         "β₁ proxy: count of files with both inbound and outbound internal edges (cycle indicator).",
         "Risk bands: LOW < 35 ≤ MEDIUM < 55 ≤ HIGH < 75 ≤ CRITICAL.",
@@ -244,9 +249,10 @@ def build_technical_sections(outcome: "RepositoryOutcome") -> dict[str, str | li
             f"*… {len(outcome.entities) - 60} more entities in omega-entities.csv*"
         )
 
-    if outcome.dimensions:
+    app_dims = [d for d in (outcome.dimensions or []) if d.get("applicable", True)]
+    if app_dims:
         sections["quality_dimensions_technical"] = []
-        for d in outcome.dimensions:
+        for d in app_dims:
             sections["quality_dimensions_technical"].append(
                 f"### {d['name']} (`{d['id']}`) — score {d['score']}, band {d['band']}, "
                 f"weight {d['weight']}, aggregate {d['repo_aggregate']} {d['unit']}"

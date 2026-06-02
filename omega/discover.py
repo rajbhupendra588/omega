@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from omega.scan_config import skip_test_paths
+
 # Extensions → language id
 _LANG_MAP: dict[str, str] = {
     ".py": "python",
@@ -70,6 +72,36 @@ _SKIP_DIRS = {
     ".omega-cache",
 }
 
+# Path segments skipped when OMEGA_SKIP_TEST_PATHS=1 (default).
+_SKIP_TEST_SEGMENTS = frozenset(
+    {
+        "guava-tests",
+        "guava-testlib",
+        "guava-gwt",
+        "integration-tests",
+        "__tests__",
+        "testdata",
+        "test-data",
+        "fixtures",
+        "snapshots",
+    }
+)
+
+
+def _is_test_path(path: Path) -> bool:
+    if not skip_test_paths():
+        return False
+    for part in path.parts:
+        low = part.lower()
+        if low in _SKIP_TEST_SEGMENTS:
+            return True
+        if low == "tests" or low.endswith("-tests") or low.endswith("_tests"):
+            return True
+        if low.startswith("test-") or low.startswith("test_"):
+            return True
+    return False
+
+
 _SKIP_EXTENSIONS = {
     ".min.js",
     ".bundle.js",
@@ -126,6 +158,8 @@ def discover_source_files(root: Path) -> RepoInventory:
         if not path.is_file():
             continue
         if any(part in _SKIP_DIRS for part in path.parts):
+            continue
+        if _is_test_path(path.relative_to(root)):
             continue
         name_lower = path.name.lower()
         if any(name_lower.endswith(ext) for ext in _SKIP_EXTENSIONS):

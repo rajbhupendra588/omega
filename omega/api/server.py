@@ -16,7 +16,9 @@ from omega.api.repos import decode_repo_key
 from omega.api.store import RunStore
 from omega.api.targets import can_rerun_target, target_metadata
 from omega.dimensions import ensure_report_has_dimensions
+from omega.metrics_suite import ensure_report_has_metric_suite
 from omega.developer_guide import ensure_report_has_developer_guide
+from omega.api.delta import build_run_delta
 from omega.api.worker import execute_analysis
 from omega.report import refresh_stored_html_report
 
@@ -258,8 +260,29 @@ def get_run(run_id: str):
     return record.to_dict()
 
 
+@app.get("/api/runs/{run_id}/delta")
+def get_run_delta(run_id: str, baseline_run_id: str | None = None):
+    """Compare this run to a prior completed run (default: previous run for same repo)."""
+    record = store.get(run_id)
+    if not record:
+        raise HTTPException(404, "Run not found")
+    if record.status != "completed":
+        raise HTTPException(409, f"Run status is {record.status}")
+    delta = build_run_delta(store, run_id, baseline_run_id=baseline_run_id)
+    if delta is None:
+        return {
+            "has_baseline": False,
+            "message": "No prior completed run for this repository to compare against.",
+        }
+    return {"has_baseline": True, "delta": delta}
+
+
+def _persist_report_json(path: Path, report: dict) -> None:
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+
 @app.get("/api/runs/{run_id}/report")
-def get_report(run_id: str):
+def get_report(run_id: str, background_tasks: BackgroundTasks):
     record = store.get(run_id)
     if not record:
         raise HTTPException(404, "Run not found")
@@ -274,8 +297,13 @@ def get_report(run_id: str):
     updated = updated or u
     report, u = ensure_report_has_developer_guide(report)
     updated = updated or u
+    report, u = ensure_report_has_metric_suite(
+        report, root=record.output_dir and str(Path(record.output_dir) / "repo") or report.get("repository")
+    )
+    updated = updated or u
     if updated:
-        path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        snapshot = json.loads(json.dumps(report))
+        background_tasks.add_task(_persist_report_json, path, snapshot)
     return report
 
 
@@ -319,11 +347,58 @@ def export_file(run_id: str, kind: str):
     return FileResponse(path, media_type=media.get(kind, "application/octet-stream"))
 
 
+class PurgeResponse(BaseModel):
+    deleted: list[str]
+    skipped: list[str]
+    message: str
+
+
 @app.delete("/api/runs/{run_id}")
-def delete_run(run_id: str):
+def delete_run(run_id: str, include_in_progress: bool = False):
+    record = store.get(run_id)
+    if not record:
+        raise HTTPException(404, "Run not found")
+    if record.status in ("pending", "running") and not include_in_progress:
+        raise HTTPException(
+            409,
+            "Cannot purge a run that is still in progress. "
+            "Retry with ?include_in_progress=true to force-delete a stuck run.",
+        )
     if not store.delete(run_id):
         raise HTTPException(404, "Run not found")
-    return {"deleted": run_id}
+    return {
+        "deleted": run_id,
+        "message": f"Purged analysis run {run_id} for {record.repo_display}",
+    }
+
+
+@app.delete("/api/runs", response_model=PurgeResponse)
+def purge_all_runs(include_in_progress: bool = False):
+    deleted, skipped = store.delete_all_runs(include_in_progress=include_in_progress)
+    if not deleted and not skipped:
+        return PurgeResponse(
+            deleted=[],
+            skipped=[],
+            message="No analysis runs to purge",
+        )
+    msg = f"Purged {len(deleted)} analysis run(s)"
+    if skipped:
+        msg += f"; skipped {len(skipped)} in-progress run(s)"
+    return PurgeResponse(deleted=deleted, skipped=skipped, message=msg)
+
+
+@app.delete("/api/repos/{repo_key_enc}/runs", response_model=PurgeResponse)
+def purge_repo_runs(repo_key_enc: str, include_in_progress: bool = False):
+    repo_key = decode_repo_key(repo_key_enc)
+    if not store.list_runs_for_repo(repo_key, limit=1):
+        raise HTTPException(404, "No runs for this repository")
+    deleted, skipped = store.delete_runs_for_repo(
+        repo_key, include_in_progress=include_in_progress
+    )
+    msg = f"Purged {len(deleted)} run(s) for this repository"
+    if skipped:
+        msg += f"; skipped {len(skipped)} in-progress run(s)"
+    return PurgeResponse(deleted=deleted, skipped=skipped, message=msg)
 
 
 def _mount_frontend():
@@ -347,14 +422,21 @@ _mount_frontend()
 
 
 def main():
+    import os
+
     import uvicorn
 
-    uvicorn.run(
-        "omega.api.server:app",
-        host="0.0.0.0",
-        port=8765,
-        reload=False,
-    )
+    reload = os.environ.get("OMEGA_RELOAD", "").lower() in ("1", "true", "yes")
+    root = Path(__file__).resolve().parents[2]
+    kwargs: dict = {
+        "app": "omega.api.server:app",
+        "host": "0.0.0.0",
+        "port": 8765,
+        "reload": reload,
+    }
+    if reload:
+        kwargs["reload_dirs"] = [str(root / "omega")]
+    uvicorn.run(**kwargs)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,17 @@
-import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { getReport, getRun } from "../api/client";
 import RerunButton from "../components/RerunButton";
+import { PurgeRunButton } from "../components/PurgeReportsBar";
 import type { FullReport, RunRecord } from "../types";
 import ReportTabs from "../components/ReportTabs";
-import RepoRunHistory from "../components/RepoRunHistory";
 import { ArrowLeft, Loader2 } from "lucide-react";
 
+const RepoRunHistory = lazy(() => import("../components/RepoRunHistory"));
+const RunDeltaPanel = lazy(() => import("../components/RunDeltaPanel"));
+
 export default function ReportPage() {
+  const navigate = useNavigate();
   const { runId } = useParams<{ runId: string }>();
   const [run, setRun] = useState<RunRecord | null>(null);
   const [report, setReport] = useState<FullReport | null>(null);
@@ -20,7 +24,16 @@ export default function ReportPage() {
 
     const load = async () => {
       try {
-        const r = await getRun(runId);
+        const [r, reportResult] = await Promise.all([
+          getRun(runId),
+          getReport(runId).then(
+            (rep) => ({ ok: true as const, rep }),
+            (err) => ({
+              ok: false as const,
+              message: err instanceof Error ? err.message : "Failed to load report",
+            })
+          ),
+        ]);
         if (cancelled) return;
         setRun(r);
         if (r.status !== "completed") {
@@ -32,10 +45,11 @@ export default function ReportPage() {
           setLoading(false);
           return;
         }
-        const rep = await getReport(runId);
-        if (!cancelled) {
-          setReport(rep);
+        if (reportResult.ok) {
+          setReport(reportResult.rep);
           setError(null);
+        } else {
+          setError(reportResult.message);
         }
       } catch (e) {
         if (!cancelled) {
@@ -108,18 +122,35 @@ export default function ReportPage() {
 
   return (
     <div className="space-y-6">
-      <Link to="/" className="btn-ghost inline-flex">
-        <ArrowLeft className="h-4 w-4" />
-        Back to Dashboard
-      </Link>
-      <RepoRunHistory
-        runId={runId!}
-        currentOmega={report.omega_index}
-        onRerunQueued={() => {
-          getRun(runId!).then(setRun).catch(() => undefined);
-        }}
-      />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Link to="/" className="btn-ghost inline-flex">
+          <ArrowLeft className="h-4 w-4" />
+          Back to Dashboard
+        </Link>
+        {runId && (
+          <PurgeRunButton
+            runId={runId}
+            onDone={() => navigate("/")}
+          />
+        )}
+      </div>
       <ReportTabs report={report} runId={runId!} />
+      <Suspense
+        fallback={
+          <div className="glass-card px-5 py-4 text-sm text-omega-muted">
+            Loading run history…
+          </div>
+        }
+      >
+        <RepoRunHistory
+          runId={runId!}
+          currentOmega={report.omega_index}
+          onRerunQueued={() => {
+            getRun(runId!).then(setRun).catch(() => undefined);
+          }}
+        />
+        <RunDeltaPanel runId={runId!} />
+      </Suspense>
     </div>
   );
 }

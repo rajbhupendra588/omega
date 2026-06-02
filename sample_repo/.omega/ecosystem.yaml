@@ -1,0 +1,12 @@
+# Optional: declare business service context and ecosystem for Ω metrics.
+service:
+  name: sample-data-service
+  role: api
+  business_domains:
+    - data
+upstream:
+  - name: postgres
+    kind: datastore
+downstream:
+  - name: reporting-worker
+    kind: internal

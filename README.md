@@ -23,6 +23,30 @@ Analyze **any GitHub repository** or local project. Get a **detailed dual report
 
 ![Report improvements](docs/screenshots/report-improvements.png)
 
+## Architecture: master + language workers
+
+Omega uses a **master agent** that owns repository metadata (inventory, tech stack, coupling) and **spawns one worker agent per language** detected in the repo:
+
+| Worker strategy | Languages | Capabilities |
+|-----------------|-----------|--------------|
+| `ast_full` | Python, Java, Go | File metrics, AST entities, full implementation plans (Java/Go via tree-sitter) |
+| `heuristic_symbols` | JS, TS, Kotlin, Rust, … | File metrics, symbol-level improvements + sketches |
+| `file_metrics_only` | SQL, shell, … | File metrics + business notes |
+
+Worker results and the orchestration plan are stored in each report as `agent_manifest` (JSON). Set `OMEGA_MAX_WORKER_AGENTS=8` to cap parallel workers.
+
+### Performance (large repos like [google/guava](https://github.com/google/guava))
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `OMEGA_MAX_FILES` | `350` | Cap production source files analyzed (largest files kept) |
+| `OMEGA_SKIP_TEST_PATHS` | `1` | Skip `guava-tests`, `*-tests`, `__tests__`, etc. |
+| `OMEGA_FILE_WORKERS` | `8` | Parallel per-file analysis within each language worker |
+| `OMEGA_IMPL_MAX_ENTITIES` | `80` | Implementation diffs only for top-N riskiest symbols |
+| `OMEGA_MAX_ENTITIES_PER_FILE` | `10` | Cap symbols extracted per file (heuristic) |
+
+Use `OMEGA_MAX_FILES=0` for no file cap (slow on huge monorepos).
+
 ## Quick start
 
 ```bash
@@ -61,35 +85,38 @@ Scans include **all** discoverable source files in the repository (no file-count
 
 ## Supported languages
 
-Python (full AST), plus heuristic analysis for JavaScript, TypeScript, Java, Go, Rust, C/C++, C#, Ruby, PHP, Kotlin, Swift, Scala, and more.
+Python, **Java**, and **Go** use **full AST** analysis (cyclomatic complexity, nesting, structural entropy, import coupling). JavaScript, TypeScript, Kotlin, C#, Rust, Ruby, PHP, Scala, C/C++, and more get **heuristic** file metrics and symbol-level improvements with implementation sketches where complexity thresholds are met.
 
 ## Web dashboard (world-class UI)
 
 Run analysis and view **Business + Technical** reports in the browser.
 
 ```bash
-cd /Users/bhupendra/omega
 chmod +x scripts/start-ui.sh
 ./scripts/start-ui.sh
 ```
 
-Open **http://127.0.0.1:8765**
+Open **http://127.0.0.1:5173** (development — UI and API auto-reload on file changes).
+
+Production-style (single port, built assets):
+
+```bash
+./scripts/start-ui.sh --prod
+# Open http://127.0.0.1:8765
+```
 
 - **Dashboard** — history of all analyses  
 - **New Analysis** — paste any public `owner/repo` or GitHub URL  
-- **Report view** — Overview, **Improvements** (per class/method/field), **Symbols** table, Business, Technical, Files, exports
+- **Report view** — Overview, **Developer**, **Dimensions**, **Improvements**, **Symbols**, Business, Technical, Files, exports
 - **Granular analysis** — every class, method, and field measured with specific improvement areas  
+- **Metric suite** — N mathematical metrics (code field, business context, upstream/downstream services, ecosystem impact); optional `.omega/ecosystem.yaml` for service graph  
+- **Dimension families** — contextual lenses (`field`, `business`, and optional `ecosystem`, `ai_era`, `ml_dl`, `temporal` when the repo qualifies). **Letter grade A–F uses the Ω index only** — dimension scores do not change the grade  
 
-Development (hot reload frontend):
+Manual split (optional):
 
 ```bash
-# Terminal 1
-pip install -e ".[ui]"
-omega-ui
-
-# Terminal 2
-cd dashboard && npm install && npm run dev
-# Open http://127.0.0.1:5173
+OMEGA_RELOAD=1 omega-ui          # API only, port 8765
+cd dashboard && npm run dev      # UI only, port 5173
 ```
 
 ## Requirements
@@ -97,6 +124,25 @@ cd dashboard && npm install && npm run dev
 - Python 3.10+
 - `git` on PATH (for GitHub URLs)
 - Node.js 18+ (to build dashboard, or use `scripts/start-ui.sh` which builds once)
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+Covers metric functions, repository analysis, run deltas, and baseline indices.
+
+## Benchmark study (30 repos)
+
+Reproducible comparison of Ω vs. cyclomatic-only vs. curator reference grades:
+
+```bash
+python benchmark/run_benchmark.py --quick
+```
+
+See [docs/benchmark/BENCHMARK.md](docs/benchmark/BENCHMARK.md) for methodology. Optional SonarCloud: set `SONAR_TOKEN` and install `sonar-scanner`.
 
 ## Regenerate README screenshots
 

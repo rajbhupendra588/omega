@@ -16,20 +16,325 @@ class ImplementationStep:
     description: str
     code: str
     business_outcome: str
+    before_code: str = ""
+    after_code: str = ""
+    language: str = "python"
+    entity_type: str = "function"
+
+    def to_dict(self) -> dict[str, str]:
+        before, after = _sanitize_diff_pair(
+            self.before_code,
+            self.after_code or self.code,
+            entity_type=self.entity_type,
+        )
+        before = _preserve_code(before)
+        after = _preserve_code(after)
+        path = self.location.split(":")[0]
+        return {
+            "title": self.title,
+            "location": self.location,
+            "description": self.description,
+            "before": before,
+            "after": after,
+            "language": self.language,
+            "business_outcome": self.business_outcome,
+            "simple_summary": _human_summary(self.title, self.description, path, self.business_outcome),
+            "steps": _human_steps(self.location, bool(before)),
+        }
 
     def to_markdown(self) -> str:
+        d = self.to_dict()
+        path = self.location.split(":")[0]
+        fence = d["language"] if d["language"] not in ("", "text") else "python"
+        if d["before"] and d["after"]:
+            code_block = f"```diff\n{_unified_diff_text(d['before'], d['after'], path)}\n```"
+        elif d["after"]:
+            code_block = f"```{fence}\n{d['after']}\n```"
+        else:
+            code_block = ""
         return (
-            f"### {self.title}\n"
-            f"**Where:** `{self.location}`\n\n"
-            f"{self.description}\n\n"
-            f"```python\n{self.code.strip()}\n```\n\n"
-            f"**Outcome:** {self.business_outcome}\n"
+            f"### {d['title']}\n"
+            f"**Where:** `{d['location']}`\n\n"
+            f"{d['description']}\n\n"
+            f"{code_block}\n\n"
+            f"**Outcome:** {d['business_outcome']}\n"
         )
+
+
+def _human_summary(title: str, description: str, path: str, outcome: str) -> str:
+    short = (description or "").split(".")[0].strip()
+    if short and len(short) < 180:
+        return short + ("." if not short.endswith(".") else "")
+    if outcome:
+        bit = outcome.split(".")[0].strip()
+        if bit:
+            return bit + "."
+    file_name = path.rsplit("/", 1)[-1]
+    clean = title.replace("`", "")
+    return f"{clean} — update `{file_name}` so the code is easier to change and test."
+
+
+def _human_steps(location: str, has_before: bool) -> list[str]:
+    if ":" in location:
+        file_path, line_part = location.split(":", 1)
+    else:
+        file_path, line_part = location, ""
+    steps = [f"Open `{file_path}` in your editor."]
+    if line_part and not line_part.startswith("1 ("):
+        steps.append(f"Go to lines {line_part}.")
+    if has_before:
+        steps.append("Find the code in the red box (what you have now).")
+        steps.append("Replace it with the code in the green box (the fix).")
+    else:
+        steps.append("Add the code from the green box at that location.")
+    steps.append("Run your tests, then commit.")
+    return steps
+
+
+def _unified_diff_text(before: str, after: str, path: str) -> str:
+    """Simple unified diff for markdown exports (omega-implementations.md, HTML)."""
+    a = before.replace("\r\n", "\n").split("\n")
+    b = after.replace("\r\n", "\n").split("\n")
+    m, n = len(a), len(b)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+    lines = [f"--- a/{path}", f"+++ b/{path}"]
+    i, j = m, n
+    stack: list[tuple[str, str]] = []
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and a[i - 1] == b[j - 1]:
+            stack.append((" ", a[i - 1]))
+            i -= 1
+            j -= 1
+        elif j > 0 and (i == 0 or dp[i][j - 1] >= dp[i - 1][j]):
+            stack.append(("+", b[j - 1]))
+            j -= 1
+        else:
+            stack.append(("-", a[i - 1]))
+            i -= 1
+    for prefix, text in reversed(stack):
+        lines.append(f"{prefix}{text}")
+    return "\n".join(lines)
+
+
+def _steps_output(
+    steps: list[ImplementationStep],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[dict[str, str], ...]]:
+    if not steps:
+        return (), (), ()
+    return (
+        tuple(s.to_markdown() for s in steps),
+        tuple(f"[{s.location}] {s.title}" for s in steps),
+        tuple(s.to_dict() for s in steps),
+    )
+
+
+def _preserve_code(code: str) -> str:
+    """Keep leading indentation; only normalize newlines and trailing whitespace."""
+    if not code:
+        return ""
+    return code.replace("\r\n", "\n").rstrip("\n")
+
+
+def _leading_indent(line: str) -> str:
+    m = re.match(r"^(\s*)", line)
+    return m.group(1) if m else ""
+
+
+def _source_slice(source: str, start_line: int, end_line: int) -> str:
+    lines = source.splitlines()
+    if not lines or start_line < 1:
+        return ""
+    end = min(end_line, len(lines))
+    return "\n".join(lines[start_line - 1 : end])
+
+
+def _source_slice_with_context(
+    source: str, start_line: int, end_line: int, padding: int = 4
+) -> str:
+    """File excerpt with surrounding lines for diff context (indentation preserved)."""
+    lines = source.splitlines()
+    if not lines:
+        return ""
+    start = max(1, start_line - padding)
+    end = min(len(lines), end_line + padding)
+    return _source_slice(source, start, end)
+
+
+_JAVA_METHOD_HEAD = re.compile(
+    r"^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?"
+    r"(?:[\w.<>,\s\[\]?]+)\s+(\w+)\s*\(",
+    re.M,
+)
+_GO_FUNC_HEAD = re.compile(r"^\s*func\s+(?:\([^)]+\)\s+)?(\w+)\s*\(", re.M)
+
+
+def _method_body_span(lines: list[str], start_line: int) -> tuple[int, int]:
+    """From 1-based method header line, find closing brace of method body."""
+    idx = start_line - 1
+    if idx < 0 or idx >= len(lines):
+        return start_line, start_line
+    depth = 0
+    started = False
+    end = start_line
+    for i in range(idx, len(lines)):
+        line = lines[i]
+        for ch in line:
+            if ch == "{":
+                depth += 1
+                started = True
+            elif ch == "}":
+                depth -= 1
+                if started and depth <= 0:
+                    return start_line, i + 1
+        end = i + 1
+    return start_line, end
+
+
+def _branch_count_in_slice(source: str, start: int, end: int) -> int:
+    chunk = _source_slice(source, start, end).lower()
+    return len(
+        re.findall(
+            r"\b(if|for|while|switch|catch|else\s+if|case)\b",
+            chunk,
+        )
+    )
+
+
+def _find_symbol_line_range(
+    source: str,
+    name: str,
+    *,
+    entity_type: str,
+    language: str,
+    line_start: int = 0,
+    line_end: int = 0,
+) -> tuple[int, int]:
+    """Resolve 1-based line range for the symbol (method body, not whole file)."""
+    lines = source.splitlines()
+    n = len(lines)
+    if not n:
+        return 1, 1
+
+    lo = max(1, line_start) if line_start > 0 else 1
+    hi = min(n, line_end) if line_end > 0 else n
+
+    if entity_type in ("method", "function"):
+        if language == "java" or source.lstrip().startswith("package "):
+            for m in _JAVA_METHOD_HEAD.finditer(source):
+                line_no = source[: m.start()].count("\n") + 1
+                if m.group(1) == name and lo <= line_no <= hi:
+                    return _method_body_span(lines, line_no)
+        if language == "go":
+            for m in _GO_FUNC_HEAD.finditer(source):
+                line_no = source[: m.start()].count("\n") + 1
+                if m.group(1) == name and lo <= line_no <= hi:
+                    return _method_body_span(lines, line_no)
+        for i, line in enumerate(lines, 1):
+            if lo <= i <= hi and name in line and (
+                "def " in line or "function " in line or f" {name}(" in line or f"{name}(" in line
+            ):
+                return _method_body_span(lines, i) if "{" in line else (i, min(i + 45, hi))
+
+    if entity_type == "class" and line_start > 0 and line_end > 0:
+        best: tuple[int, int, int] | None = None
+        if language == "java":
+            for m in _JAVA_METHOD_HEAD.finditer(source):
+                line_no = source[: m.start()].count("\n") + 1
+                if not (lo <= line_no <= hi):
+                    continue
+                ms, me = _method_body_span(lines, line_no)
+                branches = _branch_count_in_slice(source, ms, me)
+                if best is None or branches > best[2]:
+                    best = (ms, me, branches)
+        if best and best[2] > 0:
+            return best[0], best[1]
+        return lo, min(hi, lo + 80)
+
+    for i, line in enumerate(lines, 1):
+        if name in line and ("def " in line or "function " in line or f" {name}(" in line):
+            return _method_body_span(lines, i) if "{" in line else (i, min(i + 45, n))
+
+    return lo, min(hi, lo + 40)
+
+
+def _sanitize_diff_pair(
+    before: str,
+    after: str,
+    *,
+    entity_type: str,
+) -> tuple[str, str]:
+    """
+    Avoid diffs that imply deleting package/imports/class headers and replacing
+    with a small sketch (common bug for Java class-level heuristics).
+    """
+    before = _preserve_code(before)
+    after = _preserve_code(after)
+    if not after:
+        return before, after
+    if not before:
+        return before, after
+
+    b_lines = [ln for ln in before.splitlines() if ln.strip()]
+    a_lines = [ln for ln in after.splitlines() if ln.strip()]
+    if not b_lines:
+        return "", after
+
+    header_markers = (
+        "package ",
+        "import ",
+        "public class",
+        "class ",
+        "@Service",
+        "@Component",
+        "@Slf4j",
+    )
+    head = b_lines[: min(20, len(b_lines))]
+    header_hits = sum(1 for ln in head if any(m in ln for m in header_markers))
+
+    if header_hits >= 2 and len(a_lines) < len(b_lines) * 0.4:
+        return "", after
+    if entity_type == "class" and header_hits >= 1 and len(a_lines) < len(b_lines) * 0.5:
+        return "", after
+    return before, after
+
+
+def _node_source(source: str, node: ast.AST) -> str:
+    if hasattr(node, "lineno") and hasattr(node, "end_lineno"):
+        return _source_slice(source, node.lineno or 1, node.end_lineno or node.lineno or 1)
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return ""
 
 
 def _indent(code: str, spaces: int = 4) -> str:
     prefix = " " * spaces
     return "\n".join(prefix + line if line.strip() else line for line in code.splitlines())
+
+
+def _reindent_block(code: str, indent: str) -> str:
+    """Dedent a slice to its minimum indent, then apply a uniform body indent."""
+    lines = code.replace("\r\n", "\n").split("\n")
+    if not lines:
+        return ""
+    non_empty = [ln for ln in lines if ln.strip()]
+    if not non_empty:
+        return ""
+    min_len = min(len(_leading_indent(ln)) for ln in non_empty)
+    out: list[str] = []
+    for ln in lines:
+        if not ln.strip():
+            out.append("")
+            continue
+        body = ln[min_len:] if len(ln) >= min_len else ln.lstrip()
+        out.append(f"{indent}{body}")
+    return "\n".join(out)
 
 
 def _arg_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
@@ -54,6 +359,7 @@ def _generate_process_style_refactor(
     file_path: str,
     func_name: str,
     class_name: str | None,
+    source: str,
 ) -> ImplementationStep | None:
     """Concrete refactor for mode-branch + nested if patterns (common in this codebase)."""
     mode_checks = _string_comparisons_in_node(node)
@@ -67,14 +373,7 @@ def _generate_process_style_refactor(
     h_loose = f"_{file_base}_apply_loose"
     h_decrement = f"_{file_base}_apply_decrement"
 
-    return ImplementationStep(
-        title=f"Refactor `{prefix}{func_name}` in `{file_path}` (mode branches → helpers)",
-        location=f"{file_path}:{node.lineno}-{node.end_lineno}",
-        description=(
-            f"This file's `{func_name}` uses string modes `strict` / `loose` and deep nesting. "
-            f"Apply the following **in `{file_path}`** — names and parameters match the existing signature."
-        ),
-        code=textwrap.dedent(f"""
+    after_body = textwrap.dedent(f"""
             def {h_strict}(item, threshold, callback, extra, result):
                 if item <= threshold:
                     return
@@ -106,7 +405,18 @@ def _generate_process_style_refactor(
                     else:
                         {h_decrement}(item, result)
                 return result
-        """),
+        """)
+    return ImplementationStep(
+        title=f"Refactor `{prefix}{func_name}` in `{file_path}` (mode branches → helpers)",
+        location=f"{file_path}:{node.lineno}-{node.end_lineno}",
+        description=(
+            f"This file's `{func_name}` uses string modes `strict` / `loose` and deep nesting. "
+            f"Apply the following **in `{file_path}`** — names and parameters match the existing signature."
+        ),
+        code=after_body,
+        before_code=_node_source(source, node) or _unparse(node),
+        after_code=after_body,
+        language="python",
         business_outcome=(
             f"Same behavior as current `{file_path}::{func_name}`; each branch testable in isolation."
         ),
@@ -305,6 +615,20 @@ def plan_python_function(
         block_src = "\n".join(lines[start - 1 : end])
         helper = f"{helper_prefix}nested_block_{start}"
         chain_txt = " → ".join(chain)
+        arg_list = ", ".join(_arg_names(node))
+        func_start = node.lineno or 1
+        func_end = node.end_lineno or func_start
+        def_indent = _leading_indent(lines[func_start - 1]) if func_start <= len(lines) else ""
+        body_indent = def_indent + "    "
+        call_line = f"{body_indent}{helper}({arg_list}, result)"
+        func_lines = lines[func_start - 1 : func_end]
+        rel_start = max(0, start - func_start)
+        rel_end = max(rel_start, end - func_start + 1)
+        refactored_func = func_lines[:rel_start] + [call_line] + func_lines[rel_end:]
+        helper_body = _reindent_block(block_src, body_indent)
+        helper_def = f"{def_indent}def {helper}({arg_list}, result):\n{helper_body}"
+        before_code = _source_slice_with_context(source, func_start, func_end, padding=2)
+        after_code = f"{helper_def}\n\n" + "\n".join(refactored_func)
         steps.append(
             ImplementationStep(
                 title=f"Extract nested block from `{prefix}{func_name}` → `{helper}()`",
@@ -314,12 +638,10 @@ def plan_python_function(
                     f"Move lines {start}–{end} into a helper in the **same file** `{file_path}` "
                     f"using the same variables already in scope."
                 ),
-                code=(
-                    f"def {helper}({', '.join(_arg_names(node))}, result):\n"
-                    f"{textwrap.indent(block_src.strip(), '    ')}\n\n"
-                    f"# In {prefix}{func_name} at line {start}, replace lines {start}-{end} with:\n"
-                    f"{helper}({', '.join(_arg_names(node))}, result)\n"
-                ),
+                code=after_code,
+                before_code=before_code,
+                after_code=after_code,
+                language="python",
                 business_outcome=f"Isolates the hardest branch of `{func_name}` for unit testing without changing file layout.",
             )
         )
@@ -329,8 +651,20 @@ def plan_python_function(
         arg_names = _arg_names(node)
         if arg_names:
             dc_name = f"{func_name.title().replace('_', '')}Params"
-            fields = "\n".join(f"    {n}: Any  # tighten type from usage in {file_path}" for n in arg_names)
-            call_args = ", ".join(f"params.{n}" for n in arg_names)
+            field_lines = "\n".join(
+                f"    {n}: Any  # tighten type from usage in {file_path}" for n in arg_names
+            )
+            dc_code = (
+                "from dataclasses import dataclass\n"
+                "from typing import Any\n\n"
+                f"@dataclass\n"
+                f"class {dc_name}:\n"
+                f"{field_lines}\n\n"
+                f"def {func_name}(params: {dc_name}) -> ...:\n"
+                f"    # body unchanged, replace {arg_names[0]} with params.{arg_names[0]}, etc.\n\n"
+                f"# Caller in this repo (example):\n"
+                f"# {func_name}({dc_name}({', '.join(f'{n}=...' for n in arg_names)}))\n"
+            )
             steps.append(
                 ImplementationStep(
                     title=f"Introduce `{dc_name}` in `{file_path}` for `{func_name}`",
@@ -340,20 +674,7 @@ def plan_python_function(
                         f"Group them into a dataclass defined in the same module so existing callers "
                         f"can migrate incrementally."
                     ),
-                    code=textwrap.dedent(f"""
-                        from dataclasses import dataclass
-                        from typing import Any
-
-                        @dataclass
-                        class {dc_name}:
-                {fields}
-
-                        def {func_name}(params: {dc_name}) -> ...:
-                            # body unchanged, replace {arg_names[0]} with params.{arg_names[0]}, etc.
-
-                        # Caller in this repo (example):
-                        # {func_name}({dc_name}({', '.join(f'{n}=...' for n in arg_names)}))
-                    """),
+                    code=dc_code,
                     business_outcome="Stabilizes the public surface of this function as the repo grows.",
                 )
             )
@@ -617,12 +938,21 @@ def build_implementation_plan(
     method_count: int = 0,
     field_count: int = 0,
     risk_band: str = "LOW",
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    line_start: int = 0,
+    line_end: int = 0,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[dict[str, str], ...]]:
     """
-    Returns (implementation_markdown_blocks, implementation_steps_plain_for_json).
+    Returns (markdown_blocks, plain_summaries, structured_diffs for UI).
     """
     if risk_band == "LOW" and cyclomatic < 7 and nesting < 3 and loc < 35:
-        return (), ()
+        return (), (), ()
+
+    needs_heavy_ast = (
+        risk_band in ("HIGH", "CRITICAL")
+        or cyclomatic >= 12
+        or nesting >= 5
+        or loc >= 55
+    )
 
     py_ast_ready = language == "python" and (
         (
@@ -632,7 +962,7 @@ def build_implementation_plan(
         or (entity_type == "class" and class_node is not None)
         or (entity_type == "field" and node is not None)
     )
-    if not py_ast_ready:
+    if not py_ast_ready or not needs_heavy_ast:
         return _plan_heuristic_impl(
             entity_type=entity_type,
             file_path=file_path,
@@ -643,6 +973,8 @@ def build_implementation_plan(
             loc=loc,
             params=params,
             language=language,
+            line_start=line_start,
+            line_end=line_end,
         )
 
     parts = qualified_name.split(".")
@@ -656,7 +988,9 @@ def build_implementation_plan(
         node, (ast.FunctionDef, ast.AsyncFunctionDef)
     ):
         generators = [
-            lambda: _generate_process_style_refactor(node, file_path, func_or_class, class_name),
+            lambda: _generate_process_style_refactor(
+                node, file_path, func_or_class, class_name, source
+            ),
         ]
         if isinstance(node, ast.FunctionDef):
             generators.append(lambda: _generate_legacy_handler_iterative(node, file_path))
@@ -713,23 +1047,34 @@ def build_implementation_plan(
             )
         )
 
-    if not steps:
-        return (), ()
-
-    md_blocks = tuple(s.to_markdown() for s in steps)
-    plain = tuple(
-        f"[{s.location}] {s.title}: {s.description[:200]}..." for s in steps
-    )
-    return md_blocks, plain
+    return _steps_output(steps)
 
 
 def _lang_fence(file_path: str, language: str) -> str:
     if language == "python" or file_path.endswith(".py"):
         return "python"
-    if file_path.endswith((".ts", ".tsx")):
+    if language in ("typescript",) or file_path.endswith((".ts", ".tsx")):
         return "typescript"
-    if file_path.endswith(".java"):
+    if language == "java" or file_path.endswith(".java"):
         return "java"
+    if language == "kotlin" or file_path.endswith(".kt"):
+        return "kotlin"
+    if language == "csharp" or file_path.endswith(".cs"):
+        return "csharp"
+    if language == "go" or file_path.endswith(".go"):
+        return "go"
+    if language == "rust" or file_path.endswith(".rs"):
+        return "rust"
+    if language == "ruby" or file_path.endswith(".rb"):
+        return "ruby"
+    if language == "php" or file_path.endswith(".php"):
+        return "php"
+    if language == "scala" or file_path.endswith(".scala"):
+        return "scala"
+    if language in ("cpp", "c", "objc") or file_path.endswith(
+        (".cpp", ".cc", ".c", ".h", ".hpp", ".m", ".mm")
+    ):
+        return "cpp"
     return "javascript"
 
 
@@ -744,20 +1089,34 @@ def _plan_heuristic_impl(
     loc: int,
     params: int,
     language: str = "unknown",
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    line_start: int = 0,
+    line_end: int = 0,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[dict[str, str], ...]]:
     name = qualified_name.split(".")[-1]
-    lines = source.splitlines()
-    start_hint = 1
-    for i, line in enumerate(lines, 1):
-        if name in line and ("function" in line or "def " in line or f" {name}(" in line):
-            start_hint = i
-            break
-
     fence = _lang_fence(file_path, language)
     is_py = fence == "python"
-    steps: list[str] = []
-    if cyclomatic >= 8:
-        helper = f"_refactor_{name}_core"
+
+    start_hint, end_hint = _find_symbol_line_range(
+        source,
+        name,
+        entity_type=entity_type,
+        language=language,
+        line_start=line_start,
+        line_end=line_end,
+    )
+    before_snippet = _source_slice_with_context(source, start_hint, end_hint, padding=2)
+
+    steps: list[ImplementationStep] = []
+    target_name = name
+    if entity_type == "class" and fence == "java":
+        for m in _JAVA_METHOD_HEAD.finditer(source):
+            line_no = source[: m.start()].count("\n") + 1
+            if line_no == start_hint:
+                target_name = m.group(1)
+                break
+
+    if cyclomatic >= 8 and entity_type in ("method", "function", "class"):
+        helper = f"_refactor_{target_name}_core"
         if is_py:
             code = textwrap.dedent(f"""
                 def {helper}(...):  # copy parameter list from {name}
@@ -766,6 +1125,36 @@ def _plan_heuristic_impl(
 
                 def {name}(...):
                     return {helper}(...)
+            """)
+        elif fence == "go":
+            code = textwrap.dedent(f"""
+                func {helper}(/* same params as {name} */) {{
+                    // move innermost if/for/range from lines ~{start_hint}
+                }}
+
+                func {name}(/* existing params */) {{
+                    {helper}(/* pass through */)
+                }}
+            """)
+        elif fence == "rust":
+            code = textwrap.dedent(f"""
+                fn {helper}(/* same params as {name} */) {{
+                    // move innermost match/if block from lines ~{start_hint}
+                }}
+
+                fn {name}(/* existing params */) {{
+                    {helper}(/* pass through */)
+                }}
+            """)
+        elif fence == "java":
+            code = textwrap.dedent(f"""
+                // Add inside class body (do not remove package/imports/class declaration):
+                private void {helper}(/* same params as {target_name} */) {{
+                    // move nested if/for from `{target_name}` (lines ~{start_hint}-{end_hint})
+                }}
+
+                // Then simplify `{target_name}` to delegate:
+                // public ... {target_name}(...) {{ {helper}(...); }}
             """)
         else:
             code = textwrap.dedent(f"""
@@ -777,27 +1166,48 @@ def _plan_heuristic_impl(
                   return {helper}(...);
                 }}
             """)
+        after_code = code.strip()
+        diff_before, diff_after = _sanitize_diff_pair(
+            before_snippet,
+            after_code,
+            entity_type=entity_type,
+        )
+        loc_label = f"{file_path}:{start_hint}-{end_hint}"
         steps.append(
-            f"### Extract core logic from `{name}`\n"
-            f"**Where:** `{file_path}:{start_hint}+`\n\n"
-            f"In `{file_path}`, create `{helper}()` beside `{name}` and move the innermost "
-            f"`if`/`for` block (highest nesting) into it. Call `{helper}()` from `{name}` with "
-            f"the same variables already used in that block.\n\n"
-            f"```{fence}\n{code.strip()}\n```\n"
+            ImplementationStep(
+                title=f"Extract core logic from `{target_name}`",
+                location=loc_label,
+                description=(
+                    f"In `{file_path}`, add `{helper}()` inside the class and move nested logic from "
+                    f"`{target_name}` (lines {start_hint}–{end_hint}). Keep package, imports, and class "
+                    f"declaration unchanged — only refactor the method body."
+                ),
+                code=after_code,
+                before_code=diff_before,
+                after_code=diff_after,
+                language=fence,
+                entity_type=entity_type,
+                business_outcome=f"Reduces branching inside `{target_name}` without changing public API.",
+            )
         )
     if params >= 5:
-        if is_py:
-            steps.append(
-                f"### Parameter object for `{name}` in `{file_path}`\n"
-                f"Add `@dataclass class {name.title()}Options:` in `{file_path}` and change "
-                f"`{name}` to accept a single `options` argument.\n"
+        param_after = (
+            f"@dataclass\nclass {name.title()}Options:\n    ...  # group {params} parameters\n"
+            if is_py
+            else f"// {name.title()}Options — group {params} parameters"
+        )
+        pb, pa = _sanitize_diff_pair(before_snippet, param_after, entity_type=entity_type)
+        steps.append(
+            ImplementationStep(
+                title=f"Parameter object for `{target_name}` in `{file_path}`",
+                location=f"{file_path}:{start_hint}+",
+                description=f"Replace {params} parameters with a single options object in `{file_path}`.",
+                code=param_after,
+                before_code=pb,
+                after_code=pa,
+                language=fence,
+                entity_type=entity_type,
+                business_outcome="Smaller call sites and easier testing.",
             )
-        else:
-            steps.append(
-                f"### Parameter object for `{name}` in `{file_path}`\n"
-                f"Define `const {name}Options = {{ ... }}` (or interface) in `{file_path}` "
-                f"and change `{name}` to accept one argument: `options`.\n"
-            )
-    if not steps:
-        return (), ()
-    return tuple(steps), tuple(s[:80] for s in steps)
+        )
+    return _steps_output(steps)

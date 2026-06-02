@@ -11,6 +11,7 @@ from pathlib import Path
 
 from omega.analyzer import RepositoryOutcome
 from omega.dimensions import ensure_report_has_dimensions
+from omega.metrics_suite import ensure_report_has_metric_suite
 from omega.developer_guide import ensure_report_has_developer_guide
 from omega.discover import RepoInventory
 from omega.entities import EntityMetrics
@@ -107,7 +108,8 @@ def _dimensions_html(outcome: RepositoryOutcome) -> str:
               </div>
               <div class="dim-bar mono">{bar} {d['score']}/100</div>
               <p class="dim-summary">{_esc(d['summary_technical'])}</p>
-              <p class="dim-agg mono">This repo: {d['repo_aggregate']} {d['unit']} · weight {d['weight']}</p>
+              <p class="dim-agg mono">This repo: {d['repo_aggregate']} {d['unit']} · weight {d['weight']} · does not affect letter grade</p>
+              {f"<p class='dim-qual' style='font-size:0.85rem;color:var(--muted)'>{_esc(d['qualification'])}</p>" if d.get('qualification') else ""}
               {"<ul class='dim-ev'>" + ev_lis + "</ul>" if ev_lis else ""}
               {"<ul class='dim-sym'>" + sym_lis + "</ul>" if sym_lis else ""}
               {"<p class='dim-act-lbl'>Actions in this codebase:</p><ul class='dim-act'>" + act_lis + "</ul>" if act_lis else ""}
@@ -678,6 +680,7 @@ def outcome_from_report_dict(data: dict) -> RepositoryOutcome:
             improvement_areas_business=tuple(e.get("improvement_areas_business", [])),
             implementation_plan=tuple(e.get("implementation_plan", [])),
             implementation_summary=tuple(e.get("implementation_summary", [])),
+            implementation_diffs=tuple(e.get("implementation_diffs", [])),
             parent_class=e.get("parent_class"),
             parameter_count=int(e.get("parameter_count", 0)),
             method_count=int(e.get("method_count", 0)),
@@ -713,6 +716,7 @@ def outcome_from_report_dict(data: dict) -> RepositoryOutcome:
         improvement_plan=list(data.get("improvement_plan", [])),
         developer_guide=dict(data.get("developer_guide", {})),
         dimensions=list(data.get("dimensions", [])),
+        metric_suite=dict(data.get("metric_suite", {})),
     )
     if _report_needs_html_refresh(data):
         outcome.business = build_business_sections(outcome)
@@ -766,6 +770,7 @@ def _outcome_to_dict(outcome: RepositoryOutcome) -> dict:
         "total_loc": outcome.total_loc,
         "pillars": outcome.pillars,
         "dimensions": outcome.dimensions,
+        "metric_suite": outcome.metric_suite,
         "developer_guide": outcome.developer_guide,
         "hotspots": outcome.hotspots,
         "languages": outcome.top_by_language,
@@ -795,6 +800,7 @@ def _outcome_to_dict(outcome: RepositoryOutcome) -> dict:
             }
             for f in outcome.files
         ],
+        "agent_manifest": outcome.agent_manifest,
         "entity_summary": outcome.entity_summary,
         "entity_hotspots": outcome.entity_hotspots,
         "improvement_plan": outcome.improvement_plan,
@@ -818,6 +824,7 @@ def _outcome_to_dict(outcome: RepositoryOutcome) -> dict:
                 "improvement_areas_business": list(e.improvement_areas_business),
                 "implementation_plan": list(e.implementation_plan),
                 "implementation_summary": list(e.implementation_summary),
+                "implementation_diffs": [dict(d) for d in e.implementation_diffs],
             }
             for e in outcome.entities
         ],
@@ -876,9 +883,9 @@ def build_report(outcome: RepositoryOutcome, output_dir: Path) -> dict[str, Path
 
     paths["json"] = output_dir / "omega-report.json"
     payload = _outcome_to_dict(outcome)
-    if not payload.get("dimensions"):
+    if "dimensions" not in payload:
         payload, _ = ensure_report_has_dimensions(payload)
-    if not (payload.get("developer_guide") or {}).get("actions"):
+    if "developer_guide" not in payload:
         payload, _ = ensure_report_has_developer_guide(payload)
     paths["json"].write_text(json.dumps(payload, indent=2), encoding="utf-8")
 

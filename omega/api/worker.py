@@ -11,6 +11,7 @@ from omega.analyzer import analyze_repository
 from omega.api.store import RunRecord, RunStore
 from omega.github import clone_github_repo, parse_github_target
 from omega.report import build_report
+from omega.scan_config import default_max_files
 
 
 def _resolve_target(target: str, run_dir: Path) -> tuple[Path, str | None, str]:
@@ -43,6 +44,7 @@ def execute_analysis(store: RunStore, run_id: str) -> None:
             root,
             github_url=github_url or record.github_url,
             repo_display=display,
+            max_files=default_max_files(),
         )
         build_report(outcome, out_dir)
         record.status = "completed"
